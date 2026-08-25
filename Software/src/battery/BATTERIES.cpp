@@ -52,6 +52,7 @@
 #include "SIMPBMS-BATTERY.h"
 #include "SONO-BATTERY.h"
 #include "STELLANTIS-SMALL-WIDE-4x4.h"
+#include "Sunwoda-ESS.h"
 #include "TESLA-BATTERY.h"
 #include "TESLA-LEGACY-BATTERY.h"
 #include "TEST-FAKE-BATTERY.h"
@@ -151,6 +152,8 @@ const char* name_for_battery_type(BatteryType type) {
       return MebBattery::Name;
     case BatteryType::VAGMqbEvo:
       return MqbEvoBattery::Name;
+    case BatteryType::SunwodaEss:
+      return SunwodaBattery::Name;
 #ifndef SMALL_FLASH_DEVICE
     case BatteryType::Mg5:
       return Mg5Battery::Name;
@@ -278,6 +281,8 @@ Battery* create_battery(BatteryType type) {
       return new MebBattery();
     case BatteryType::VAGMqbEvo:
       return new MqbEvoBattery();
+    case BatteryType::SunwodaEss:
+      return new SunwodaBattery();
 #ifndef SMALL_FLASH_DEVICE
     case BatteryType::Mg5:
       return new Mg5Battery();
