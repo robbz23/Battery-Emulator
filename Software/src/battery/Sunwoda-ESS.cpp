@@ -54,6 +54,29 @@ void SunwodaBattery::update_values() {
   //TODO: max_charge_power_W / max_discharge_power_W / current_dA have not been located
   //in the CAN stream yet. Charge/discharge current limit and power limit live under
   //gCurrLimit_90 (0x0C50FF5A) but the byte layout is not confirmed.
+
+  /*
+  Contactor closing policy:
+
+  The BCMU owns its own negative/main/precharge contactors and closes them autonomously
+  (observed in tools/pcanOut.txt: the negative contactor bit comes up on its own a few
+  hundred ms after power-up, with no request frame from the host at all). So unlike
+  batteries whose BMS waits for an explicit "close contactors" CAN command from us, there
+  is nothing to transmit here - we only need to *observe* what the BCMU already decided
+  and mirror that into the datalayer so battery-emulator's own contactor/precharge state
+  machine (precharge_control.cpp) knows it is safe to connect the DC bus to the inverter.
+
+  main_contactor_closed comes from ID_SWITCH_STATUS (gIoSwhInfo_51) and is the direct
+  feedback of the BCMU's own main contactor, so it is a stronger signal than the
+  "sleeping" bit used for the same purpose on Growatt HV Ark (which lacks contactor
+  feedback). faultActive comes from ID_FAULT_INFO; alarmActive (caution-level) is
+  intentionally not included here, matching the ERROR vs INFO split already used above.
+  */
+  datalayer.battery.status.real_bms_status =
+      extended_data.faultActive ? BMS_FAULT : (extended_data.main_contactor_closed ? BMS_ACTIVE : BMS_STANDBY);
+
+  datalayer.system.status.battery_allows_contactor_closing =
+      extended_data.main_contactor_closed && !extended_data.faultActive;
 }
 
 void SunwodaBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
@@ -167,18 +190,34 @@ void SunwodaBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
 
       break;
 
-    case ID_ALARM_INFO:  // 0x0C50FF34 - Alarm information. Bit-level meanings not
-                          // confirmed yet, so we only expose "any bit set".
+    case ID_ALARM_INFO: {  // 0x0C50FF34 - Alarm information (gAlarmInfo_52)
 
-      memcpy(extended_data.rawAlarm, rx_frame.data.u8, rx_frame.DLC > 8 ? 8 : rx_frame.DLC);
-
-      extended_data.alarmActive = false;
-      for (uint8_t i = 0; i < rx_frame.DLC && i < 8; i++) {
-        if (extended_data.rawAlarm[i] != 0) {
-          extended_data.alarmActive = true;
-          break;
-        }
+      /*
+      Multiplexed the same way as ID_SWITCH_STATUS/ID_VOLT_CHARA: byte0 is a mux marker (ignored),
+      byte1 is the subindex of the first word carried in this frame, and each subsequent u16 is one
+      more consecutive subindex. gAlarmInfo_52 has 4 subindices (external alarm 0/1, internal alarm
+      0/1), confirmed from the vendor's BCMU_APP CAN variable map (tools/H102025_P02_BCMU_APP_V1.16_
+      FerroAMP_20210420_4BMU translated.xlsx, "Current status" sheet). They normally arrive as one
+      DLC8 frame (subindex 0-2) followed by one DLC4 frame (subindex 3 only) - e.g. the header bytes
+      themselves (0x43/0x00 or 0x81/0x03) must NOT be treated as alarm data, otherwise the mux/
+      subindex bytes falsely look like an active alarm even when the real bits are all zero.
+      */
+      if (rx_frame.DLC < 4) {
+        break;
       }
+
+      uint8_t start_subindex = rx_frame.data.u8[1];
+      uint8_t words_in_frame = (rx_frame.DLC - 2) / 2;
+      for (uint8_t i = 0; i < words_in_frame; i++) {
+        uint8_t subindex = start_subindex + i;
+        if (subindex >= 4) {
+          continue;
+        }
+        extended_data.alarmWords[subindex] = u16(&rx_frame.data.u8[2 + i * 2]);
+      }
+
+      extended_data.alarmActive = (extended_data.alarmWords[0] | extended_data.alarmWords[1] |
+                                    extended_data.alarmWords[2] | extended_data.alarmWords[3]) != 0;
 
       // Surface an unspecified BMS alarm on the events page, same as other drivers do for a
       // generic "caution" bit whose exact meaning isn't broken out (e.g. Nissan Leaf case 4).
@@ -188,20 +227,28 @@ void SunwodaBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
         clear_event(EVENT_BATTERY_CAUTION);
       }
 
-      break;
+    } break;
 
-    case ID_FAULT_INFO:  // 0x0C50FF35 - Fault information. Bit-level meanings not
-                         // confirmed yet, so we only expose "any bit set".
+    case ID_FAULT_INFO: {  // 0x0C50FF35 - Fault information (gFaultInfo_53)
 
-      memcpy(extended_data.rawFault, rx_frame.data.u8, rx_frame.DLC > 8 ? 8 : rx_frame.DLC);
-
-      extended_data.faultActive = false;
-      for (uint8_t i = 0; i < rx_frame.DLC && i < 8; i++) {
-        if (extended_data.rawFault[i] != 0) {
-          extended_data.faultActive = true;
-          break;
-        }
+      // Same subindex-multiplexed layout as ID_ALARM_INFO above (4 subindices: external fault
+      // 0/1, internal fault 0/1), confirmed from the vendor's BCMU_APP CAN variable map.
+      if (rx_frame.DLC < 4) {
+        break;
       }
+
+      uint8_t start_subindex = rx_frame.data.u8[1];
+      uint8_t words_in_frame = (rx_frame.DLC - 2) / 2;
+      for (uint8_t i = 0; i < words_in_frame; i++) {
+        uint8_t subindex = start_subindex + i;
+        if (subindex >= 4) {
+          continue;
+        }
+        extended_data.faultWords[subindex] = u16(&rx_frame.data.u8[2 + i * 2]);
+      }
+
+      extended_data.faultActive = (extended_data.faultWords[0] | extended_data.faultWords[1] |
+                                    extended_data.faultWords[2] | extended_data.faultWords[3]) != 0;
 
       // A Fault frame is assumed to be more severe than an Alarm one, so it is mapped to the
       // generic ERROR-level "stop charge/discharge" event rather than the INFO-level caution
@@ -212,7 +259,7 @@ void SunwodaBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
         clear_event(EVENT_BATTERY_CHG_DISCHG_STOP_REQ);
       }
 
-      break;
+    } break;
 
     case ID_CELL_VOLTAGE_0: {  // 0x0C50FF55 - Individual cell voltages, 3 cells per frame
 
