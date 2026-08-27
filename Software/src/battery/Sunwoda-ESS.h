@@ -84,6 +84,25 @@ class SunwodaBattery : public CanBattery {
   unsigned long previousMillisStartCommand = 0;
   static const unsigned long START_COMMAND_INTERVAL_MS = 1000;
 
+  /*
+  Contactor self-test command (gCtrlInfo_70 subindex 3, "Contactor control"). Confirmed from the
+  vendor's BCMU_APP CAN variable map ("Current status" sheet, row 26): 0 = Contactor self-test,
+  1 = Contactor isolation. This is a separate RW field within the same gCtrlInfo_70 object as the
+  Start command above, so the write frame below mirrors the same inferred mux convention: mux low
+  nibble = word count in this frame (here 1, since only subindex 3 is written), byte1 = start
+  subindex (3). As with SUNWODA_START_COMMAND, the exact write byte layout is not confirmed by the
+  vendor doc (which only documents the read-side broadcast format) - verify on real hardware by
+  watching contactor_selftest_status on the advanced battery page.
+  */
+  CAN_frame SUNWODA_CONTACTOR_SELFTEST_COMMAND = {.FD = false,
+                                                  .ext_ID = true,
+                                                  .DLC = 4,
+                                                  .ID = ID_SYSTEM_CONTROL,
+                                                  .data = {0x41, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
+  //                                                       ^mux  ^sub3  ^--self-test=0--
+  unsigned long previousMillisSelfTestCommand = 0;
+  static const unsigned long SELFTEST_COMMAND_INTERVAL_MS = 1000;
+
   // Decoded values, applied to the datalayer in update_values()
   float packVoltage = 0.0f;
   float soc = 0.0f;

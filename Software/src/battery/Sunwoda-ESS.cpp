@@ -406,4 +406,19 @@ void SunwodaBattery::transmit_can(unsigned long currentMillis) {
       transmit_can_frame(&SUNWODA_START_COMMAND);
     }
   }
+
+  /*
+  Contactor self-test command: see the comment on SUNWODA_CONTACTOR_SELFTEST_COMMAND in
+  Sunwoda-ESS.h. Sent repeatedly (same retry rationale as the Start command above) until
+  contactor_selftest_status (0x0C50FF36) reports the self-test has completed. Only sent while
+  the pack is at Initialization/Stop - contactors are expected to be open at that point, which is
+  the safe/intended state to run a self-test in.
+  */
+  if (extended_data.contactor_selftest_status == 0 &&
+      (extended_data.operatingStatus == 0 || extended_data.operatingStatus == 1)) {
+    if (currentMillis - previousMillisSelfTestCommand >= SELFTEST_COMMAND_INTERVAL_MS) {
+      previousMillisSelfTestCommand = currentMillis;
+      transmit_can_frame(&SUNWODA_CONTACTOR_SELFTEST_COMMAND);
+    }
+  }
 }
