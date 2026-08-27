@@ -40,6 +40,7 @@ class SunwodaBattery : public CanBattery {
 
   static const uint32_t ID_SYSTEM_STATUS = SUNWODA_BASE_ID + 0x32;   // gStateInfo_50
   static const uint32_t ID_SWITCH_STATUS = SUNWODA_BASE_ID + 0x33;   // gIoSwhInfo_51 (contactors)
+  static const uint32_t ID_SYSTEM_CONTROL = SUNWODA_BASE_ID + 0x46;  // gCtrlInfo_70 (host -> BCMU, RW)
   static const uint32_t ID_ALARM_INFO = SUNWODA_BASE_ID + 0x34;      // gAlarmInfo_52
   static const uint32_t ID_FAULT_INFO = SUNWODA_BASE_ID + 0x35;      // gFaultInfo_53
   static const uint32_t ID_CLUSTER_INFO = SUNWODA_BASE_ID + 0x36;    // gClusterInfo_54 (contactor self-test)
@@ -48,6 +49,40 @@ class SunwodaBattery : public CanBattery {
   static const uint32_t ID_VOLT_CHARA = SUNWODA_BASE_ID + 0x51;      // gVoltChara_81
   static const uint32_t ID_TEMP_CHARA = SUNWODA_BASE_ID + 0x52;      // gTempChara_82
   static const uint32_t ID_CELL_VOLTAGE_0 = SUNWODA_BASE_ID + 0x55;  // gCellVolt_85 (cells 1-252, mV)
+
+  // Software/hardware version info. Not part of the gXxxInfo_NN / 0x0C50FF00+address family
+  // above - the vendor's variable map (tools/SoftwareAddresses.txt) lists these as "Software
+  // version number" and "Hardware version number" (both U16, display format factor 10), but
+  // gives no explicit CAN ID. These two IDs were instead identified from a real CAN capture
+  // (tools/pcanOut.txt): they are the only frames that broadcast a small, constant value once
+  // per second, which fits a version number far better than any other observed field. Treat as
+  // a best-effort inference pending confirmation against real hardware.
+  static const uint32_t ID_SOFTWARE_VERSION = 0x0C506E07;
+  static const uint32_t ID_HARDWARE_VERSION = 0x0C506E1D;
+
+  /*
+  Start command (gCtrlInfo_70 / System control commands, 0x0C50FF46). Confirmed from the vendor's
+  BCMU_APP CAN variable map (tools/_current_status.txt row 22-27, "Current status" sheet): subindex 0
+  is "Working status control" (0=Start, 1=Stop, 2=Emergency Stop, 4=Clear Fault), RW, sent on-demand
+  by the host (period=0), not broadcast periodically like the gXxxInfo_NN status frames.
+
+  A real capture (tools/pcanOut.txt) shows the pack sitting at "Battery protection status: Standby"
+  / "Operating status: Stop" for the whole ~5.5s log with contactors open (0x0C50FF33 output switch
+  status stuck at 0x0000) and this ID never transmitted by anything - i.e. nothing had ever told the
+  BCMU to start, which is consistent with contactors never closing. Sending this Start command is a
+  best-effort inference: the vendor doc does not show an example write frame, so the byte layout below
+  mirrors the read-side multiplex convention (mux 0x43 = subindex 0-2 in one frame) rather than being
+  independently confirmed. Verify on real hardware (watch operatingStatus on the advanced battery page)
+  before relying on it.
+  */
+  CAN_frame SUNWODA_START_COMMAND = {.FD = false,
+                                     .ext_ID = true,
+                                     .DLC = 8,
+                                     .ID = ID_SYSTEM_CONTROL,
+                                     .data = {0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
+  //                                          ^mux  ^sub0  ^--Start=0--  ^--mode=Normal--  ^--ctrl=Remote--
+  unsigned long previousMillisStartCommand = 0;
+  static const unsigned long START_COMMAND_INTERVAL_MS = 1000;
 
   // Decoded values, applied to the datalayer in update_values()
   float packVoltage = 0.0f;

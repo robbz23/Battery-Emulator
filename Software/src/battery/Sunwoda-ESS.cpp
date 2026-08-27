@@ -1,5 +1,6 @@
 #include "Sunwoda-ESS.h"
 #include "../battery/BATTERIES.h"
+#include "../communication/contactorcontrol/comm_contactorcontrol.h"
 #include "../datalayer/datalayer.h"
 #include "../devboard/utils/events.h"
 
@@ -77,6 +78,14 @@ void SunwodaBattery::update_values() {
 
   datalayer.system.status.battery_allows_contactor_closing =
       extended_data.main_contactor_closed && !extended_data.faultActive;
+
+  // Pack-internal contactors: the BCMU is the only thing that ever closes them (see comment
+  // above), so it is also the only thing that knows the DC bus is actually energized. Guarded
+  // so the GPIO contactor state machine (comm_contactorcontrol.cpp) stays the single writer
+  // if the user also has emulator-driven relays enabled for some other part of the topology.
+  if (!contactor_control_enabled) {
+    datalayer.system.status.dc_bus_live = extended_data.main_contactor_closed && !extended_data.faultActive;
+  }
 }
 
 void SunwodaBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
@@ -177,6 +186,54 @@ void SunwodaBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
 
       extended_data.disconnect_switch_closed = (safety_switch_status & 0x0001) != 0;
       extended_data.surge_protector_closed = (safety_switch_status & 0x0002) != 0;
+
+    } break;
+
+    case ID_SYSTEM_STATUS: {  // 0x0C50FF32 - System status (gStateInfo_50)
+
+      /*
+      Same subindex-multiplexed layout as ID_ALARM_INFO/ID_FAULT_INFO: byte0 is a mux marker
+      (ignored), byte1 is the subindex of the first word in this frame. gStateInfo_50 has 5
+      subindices, confirmed from the vendor's BCMU_APP CAN variable map ("Current status" sheet):
+      0 Battery protection status, 1 Battery pack operating status, 2 charge/discharge status,
+      3 operating mode, 4 control mode. They arrive as one DLC8 frame (subindex 0-2) followed by
+      one DLC6 frame (subindex 3-4) - e.g. "43 00 03 00 01 00 00 00" then "82 03 00 00 00 00".
+
+      operatingStatus (subindex 1) is the key diagnostic: the BCMU only closes its contactors once
+      it reaches Running (3). Reaching Running requires the host to send a Start command (see
+      ID_SYSTEM_CONTROL / transmit_can() below) - without it the pack sits at Stop (1) forever,
+      which matches a real capture (tools/pcanOut.txt) showing operatingStatus stuck at 1 and the
+      output switch status (0x0C50FF33) stuck at all-open for the whole log.
+      */
+      if (rx_frame.DLC < 4) {
+        break;
+      }
+
+      uint8_t start_subindex = rx_frame.data.u8[1];
+      uint8_t words_in_frame = (rx_frame.DLC - 2) / 2;
+      for (uint8_t i = 0; i < words_in_frame; i++) {
+        uint8_t subindex = start_subindex + i;
+        uint16_t value = u16(&rx_frame.data.u8[2 + i * 2]);
+        switch (subindex) {
+          case 0:
+            extended_data.batteryProtectionStatus = (uint8_t)value;
+            break;
+          case 1:
+            extended_data.operatingStatus = (uint8_t)value;
+            break;
+          case 2:
+            extended_data.chargeDischargeStatus = (uint8_t)value;
+            break;
+          case 3:
+            extended_data.operatingMode = (uint8_t)value;
+            break;
+          case 4:
+            extended_data.controlMode = (uint8_t)value;
+            break;
+          default:
+            break;
+        }
+      }
 
     } break;
 
@@ -286,6 +343,26 @@ void SunwodaBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
 
     } break;
 
+    case ID_SOFTWARE_VERSION:  // 0x0C506E07 - Software version number (see comment in Sunwoda-ESS.h)
+
+      if (rx_frame.DLC < 4) {
+        break;
+      }
+
+      extended_data.softwareVersion = u16(&rx_frame.data.u8[2]);
+
+      break;
+
+    case ID_HARDWARE_VERSION:  // 0x0C506E1D - Hardware version number (see comment in Sunwoda-ESS.h)
+
+      if (rx_frame.DLC < 4) {
+        break;
+      }
+
+      extended_data.hardwareVersion = u16(&rx_frame.data.u8[2]);
+
+      break;
+
     case ID_CELL_BALANCE_0: {  // 0x0C50FF3C - Cell balancing status, 6 cells per frame
 
       if (rx_frame.DLC < 8) {
@@ -311,6 +388,22 @@ void SunwodaBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
 }
 
 void SunwodaBattery::transmit_can(unsigned long currentMillis) {
-  // The BCMU broadcasts its status periodically without requiring a request frame.
-  // No outgoing frames have been identified yet.
+  /*
+  Start command: see the long comment on SUNWODA_START_COMMAND in Sunwoda-ESS.h for the CAN
+  variable map reference and the caveat that this write frame's exact byte layout is inferred,
+  not confirmed. Sent repeatedly (rather than once) in case the BCMU ignores it while it is
+  still initializing, mirroring the retry style used elsewhere in this codebase for one-shot
+  BMS commands.
+
+  Only sent while the pack is at Initialization (0) or Stop (1) - once it has moved on to
+  Starting/Running/Stopping there is nothing to (re)request, and while Fault (5) a Start command
+  would not help (would need Clear Fault instead, which is not sent automatically here since
+  auto-clearing a real fault without visibility into *why* it faulted is not safe to do blindly).
+  */
+  if (extended_data.operatingStatus == 0 || extended_data.operatingStatus == 1) {
+    if (currentMillis - previousMillisStartCommand >= START_COMMAND_INTERVAL_MS) {
+      previousMillisStartCommand = currentMillis;
+      transmit_can_frame(&SUNWODA_START_COMMAND);
+    }
+  }
 }

@@ -27,6 +27,16 @@ struct SunwodaExtendedData {
   // Contactor self-test status, 0x0C50FF36 (0 = no self-test run, 1 = self-test completed)
   uint16_t contactor_selftest_status = 0;
 
+  // System status, gStateInfo_50 (0x0C50FF32). Confirmed from the vendor's BCMU_APP CAN
+  // variable map ("Current status" sheet). operatingStatus is the key field for diagnosing
+  // why contactors are/aren't closed: the BCMU only closes them once it reaches Running (3),
+  // which requires the host to send a Start command (see ID_SYSTEM_CONTROL in Sunwoda-ESS.h).
+  uint8_t batteryProtectionStatus = 0;  // 0 Normal, 1 Fully charged, 2 Empty, 3 Standby, 4 Protection
+  uint8_t operatingStatus = 0;          // 0 Initialization, 1 Stop, 2 Starting, 3 Running, 4 Stopping, 5 Fault
+  uint8_t chargeDischargeStatus = 0;    // 0 Idle, 1 Charging, 2 Discharging
+  uint8_t operatingMode = 0;            // 0 Normal, 1 Nuclear capacity, 2 Equalization, 8 Debugging
+  uint8_t controlMode = 0;              // 0 Remote, 1 Local
+
   // Alarm (gAlarmInfo_52, 0x0C50FF34) and Fault (gFaultInfo_53, 0x0C50FF35) words, one per
   // subindex: [0] external 0, [1] external 1, [2] internal 0, [3] internal 1. Bit meanings
   // come from the vendor's BCMU_APP CAN variable map (tools/H102025_P02_BCMU_APP_V1.16_
@@ -36,6 +46,12 @@ struct SunwodaExtendedData {
   uint16_t faultWords[4] = {0, 0, 0, 0};
   bool alarmActive = false;
   bool faultActive = false;
+
+  // Software/hardware version, raw value = actual version * 10 (e.g. 21 -> v2.1). See the
+  // comment above ID_SOFTWARE_VERSION/ID_HARDWARE_VERSION in Sunwoda-ESS.h for how these were
+  // identified - best-effort inference, not confirmed from the vendor documentation.
+  uint16_t softwareVersion = 0;
+  uint16_t hardwareVersion = 0;
 };
 
 // Bit names for gAlarmInfo_52 / gFaultInfo_53, indexed [subindex][bit]. nullptr = unused/reserved.
@@ -102,6 +118,28 @@ class SunwodaHtmlRenderer : public BatteryHtmlRenderer {
     content += "<h4>Contactor self-test: " +
                String(data->contactor_selftest_status == 1 ? "Completed" : "Not run") + "</h4>";
 
+    static const char* protectionStatusNames[5] = {"Normal", "Fully charged", "Empty", "Standby", "Protection"};
+    static const char* operatingStatusNames[6] = {"Initialization", "Stop", "Starting", "Running", "Stopping",
+                                                   "Fault"};
+    static const char* chargeDischargeStatusNames[3] = {"Idle", "Charging", "Discharging"};
+
+    content += "<h4>System status:</h4>";
+    content += "<h4>Battery protection status: " + lookup(protectionStatusNames, 5, data->batteryProtectionStatus) +
+               "</h4>";
+    content +=
+        "<h4>Operating status: " + lookup(operatingStatusNames, 6, data->operatingStatus) + "</h4>";
+    content += "<h4>Charge/discharge status: " +
+               lookup(chargeDischargeStatusNames, 3, data->chargeDischargeStatus) + "</h4>";
+    if (data->operatingStatus == 0 || data->operatingStatus == 1) {
+      content +=
+          "<h4 style='color:#ffb74d;'>The BCMU has not been sent a Start command yet - contactors stay open "
+          "until it reaches Running. battery-emulator sends this automatically; if this persists check the "
+          "CAN wiring/speed.</h4>";
+    }
+
+    content += "<h4>Software version: " + String(data->softwareVersion / 10.0f, 1) + "</h4>";
+    content += "<h4>Hardware version: " + String(data->hardwareVersion / 10.0f, 1) + "</h4>";
+
     content += "<h4>Alarm active: " + String(data->alarmActive ? "Yes" : "No") + "</h4>";
     content += "<h4>Fault active: " + String(data->faultActive ? "Yes" : "No") + "</h4>";
 
@@ -113,6 +151,14 @@ class SunwodaHtmlRenderer : public BatteryHtmlRenderer {
 
  private:
   SunwodaExtendedData* data;
+
+  // Returns names[index] if in range, otherwise the raw numeric value as a fallback.
+  static String lookup(const char* const* names, uint8_t count, uint8_t index) {
+    if (index < count) {
+      return String(names[index]);
+    }
+    return "Unknown (" + String(index) + ")";
+  }
 
   // Renders any set bits as their vendor-documented name; falls back to "wordN.bitM" for
   // bits with no confirmed meaning, and shows "None" when every word is zero.
