@@ -1,5 +1,6 @@
 #include "Sunwoda-ESS.h"
 #include "../battery/BATTERIES.h"
+#include "../communication/contactorcontrol/comm_contactorcontrol.h"
 #include "../datalayer/datalayer.h"
 #include "../devboard/utils/events.h"
 
@@ -77,6 +78,14 @@ void SunwodaBattery::update_values() {
 
   datalayer.system.status.battery_allows_contactor_closing =
       extended_data.main_contactor_closed && !extended_data.faultActive;
+
+  // Pack-internal contactors: the BCMU is the only thing that ever closes them (see comment
+  // above), so it is also the only thing that knows the DC bus is actually energized. Guarded
+  // so the GPIO contactor state machine (comm_contactorcontrol.cpp) stays the single writer
+  // if the user also has emulator-driven relays enabled for some other part of the topology.
+  if (!contactor_control_enabled) {
+    datalayer.system.status.dc_bus_live = extended_data.main_contactor_closed && !extended_data.faultActive;
+  }
 }
 
 void SunwodaBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
@@ -285,6 +294,26 @@ void SunwodaBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
       }
 
     } break;
+
+    case ID_SOFTWARE_VERSION:  // 0x0C506E07 - Software version number (see comment in Sunwoda-ESS.h)
+
+      if (rx_frame.DLC < 4) {
+        break;
+      }
+
+      extended_data.softwareVersion = u16(&rx_frame.data.u8[2]);
+
+      break;
+
+    case ID_HARDWARE_VERSION:  // 0x0C506E1D - Hardware version number (see comment in Sunwoda-ESS.h)
+
+      if (rx_frame.DLC < 4) {
+        break;
+      }
+
+      extended_data.hardwareVersion = u16(&rx_frame.data.u8[2]);
+
+      break;
 
     case ID_CELL_BALANCE_0: {  // 0x0C50FF3C - Cell balancing status, 6 cells per frame
 

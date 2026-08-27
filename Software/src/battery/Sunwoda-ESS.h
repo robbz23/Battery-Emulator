@@ -49,6 +49,16 @@ class SunwodaBattery : public CanBattery {
   static const uint32_t ID_TEMP_CHARA = SUNWODA_BASE_ID + 0x52;      // gTempChara_82
   static const uint32_t ID_CELL_VOLTAGE_0 = SUNWODA_BASE_ID + 0x55;  // gCellVolt_85 (cells 1-252, mV)
 
+  // Software/hardware version info. Not part of the gXxxInfo_NN / 0x0C50FF00+address family
+  // above - the vendor's variable map (tools/SoftwareAddresses.txt) lists these as "Software
+  // version number" and "Hardware version number" (both U16, display format factor 10), but
+  // gives no explicit CAN ID. These two IDs were instead identified from a real CAN capture
+  // (tools/pcanOut.txt): they are the only frames that broadcast a small, constant value once
+  // per second, which fits a version number far better than any other observed field. Treat as
+  // a best-effort inference pending confirmation against real hardware.
+  static const uint32_t ID_SOFTWARE_VERSION = 0x0C506E07;
+  static const uint32_t ID_HARDWARE_VERSION = 0x0C506E1D;
+
   // Decoded values, applied to the datalayer in update_values()
   float packVoltage = 0.0f;
   float soc = 0.0f;

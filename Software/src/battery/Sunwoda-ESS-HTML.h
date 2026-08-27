@@ -36,6 +36,12 @@ struct SunwodaExtendedData {
   uint16_t faultWords[4] = {0, 0, 0, 0};
   bool alarmActive = false;
   bool faultActive = false;
+
+  // Software/hardware version, raw value = actual version * 10 (e.g. 21 -> v2.1). See the
+  // comment above ID_SOFTWARE_VERSION/ID_HARDWARE_VERSION in Sunwoda-ESS.h for how these were
+  // identified - best-effort inference, not confirmed from the vendor documentation.
+  uint16_t softwareVersion = 0;
+  uint16_t hardwareVersion = 0;
 };
 
 // Bit names for gAlarmInfo_52 / gFaultInfo_53, indexed [subindex][bit]. nullptr = unused/reserved.
@@ -101,6 +107,9 @@ class SunwodaHtmlRenderer : public BatteryHtmlRenderer {
 
     content += "<h4>Contactor self-test: " +
                String(data->contactor_selftest_status == 1 ? "Completed" : "Not run") + "</h4>";
+
+    content += "<h4>Software version: " + String(data->softwareVersion / 10.0f, 1) + "</h4>";
+    content += "<h4>Hardware version: " + String(data->hardwareVersion / 10.0f, 1) + "</h4>";
 
     content += "<h4>Alarm active: " + String(data->alarmActive ? "Yes" : "No") + "</h4>";
     content += "<h4>Fault active: " + String(data->faultActive ? "Yes" : "No") + "</h4>";
