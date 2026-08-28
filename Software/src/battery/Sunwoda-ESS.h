@@ -31,6 +31,12 @@ class SunwodaBattery : public CanBattery {
 
   BatteryHtmlRenderer& get_status_renderer() { return renderer; }
 
+  // Experimental, manually-triggered "Reset Command" - see SUNWODA_RESET_COMMAND below for
+  // details and caveats. Exposed as a button on the advanced battery page via Battery.h's generic
+  // supports_reset_command()/request_reset_command() hook.
+  bool supports_reset_command() override { return true; }
+  void request_reset_command() override { reset_command_requested = true; }
+
  private:
   SunwodaExtendedData extended_data;
   SunwodaHtmlRenderer renderer = SunwodaHtmlRenderer(&extended_data);
@@ -59,6 +65,21 @@ class SunwodaBattery : public CanBattery {
   // a best-effort inference pending confirmation against real hardware.
   static const uint32_t ID_SOFTWARE_VERSION = 0x0C506E07;
   static const uint32_t ID_HARDWARE_VERSION = 0x0C506E1D;
+
+  // "Reset Command", found in a second, older vendor document (tools/CAN protocol of control box -
+  // 20191029 - EN.xlsx, "BCMU(control box) CAN protocol" sheet). Uses a completely different CAN ID
+  // structure than the gXxxInfo_NN / 0x0C50FF00+address family above (Head=0x09, Source=0xE0,
+  // Destination=0xFF/broadcast, Tail=0xFF), and is NOT part of the 2021 "4BMU FerroAMP" document that
+  // ID_SYSTEM_CONTROL (the Start command) was sourced from - nor does that 2021 document mention this
+  // ID at all. Conversely, this 2019 document does not mention ID_SYSTEM_CONTROL/the Start command.
+  //
+  // This is the only host->BCMU write example given in the 2019 document, and our Start command has
+  // not shown any observable effect on real hardware so far (operatingStatus stuck at Stop despite
+  // repeated sends - see the comment on SUNWODA_START_COMMAND below). It is plausible this Reset
+  // Command is what is actually needed to get the BCMU going, but this is unverified - hence it is
+  // exposed as a manual, on-demand button only (never sent automatically) so it can be tried and
+  // observed deliberately rather than blindly retried like the other commands in this file.
+  static const uint32_t ID_RESET_COMMAND = 0x09E0FFFF;
 
   /*
   Start command (gCtrlInfo_70 / System control commands, 0x0C50FF46). Confirmed from the vendor's
@@ -102,6 +123,17 @@ class SunwodaBattery : public CanBattery {
   //                                                       ^mux  ^sub3  ^--self-test=0--
   unsigned long previousMillisSelfTestCommand = 0;
   static const unsigned long SELFTEST_COMMAND_INTERVAL_MS = 1000;
+
+  // See the long comment on ID_RESET_COMMAND above. Data bytes taken verbatim from the 2019
+  // document's only host->BCMU write example - not independently confirmed against real hardware.
+  // Sent exactly once per button press (see request_reset_command()/transmit_can()), never
+  // automatically/repeatedly like the two commands above, since its effect is unverified.
+  CAN_frame SUNWODA_RESET_COMMAND = {.FD = false,
+                                     .ext_ID = true,
+                                     .DLC = 8,
+                                     .ID = ID_RESET_COMMAND,
+                                     .data = {0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
+  bool reset_command_requested = false;
 
   // Decoded values, applied to the datalayer in update_values()
   float packVoltage = 0.0f;
