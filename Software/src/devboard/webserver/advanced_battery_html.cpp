@@ -61,6 +61,10 @@ std::vector<BatteryCommand> battery_commands = {
     {"resetEnergySavingMode", "Reset Energy Saving Mode", "reset energy saving mode to normal?",
      [](Battery* b) { return b && b->supports_energy_saving_mode_reset(); },
      [](Battery* b) { b->reset_energy_saving_mode(); }},
+    {"resetCommand", "Send Reset Command (experimental)",
+     "send the experimental BCMU Reset Command (CAN ID 0x09E0FFFF)? Its effect on real hardware is "
+     "unverified - only try this if you know what you are doing.",
+     [](Battery* b) { return b && b->supports_reset_command(); }, [](Battery* b) { b->request_reset_command(); }},
 };
 
 String advanced_battery_processor(const String& var) {

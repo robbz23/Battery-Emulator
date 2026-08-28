@@ -421,4 +421,15 @@ void SunwodaBattery::transmit_can(unsigned long currentMillis) {
       transmit_can_frame(&SUNWODA_CONTACTOR_SELFTEST_COMMAND);
     }
   }
+
+  /*
+  Experimental Reset Command (0x09E0FFFF): see the comment on ID_RESET_COMMAND in Sunwoda-ESS.h.
+  Unlike the Start and self-test commands above, this is user-triggered only via the "More Battery
+  Info" page (request_reset_command()) and sent exactly once per press, since its effect on real
+  hardware is unverified and it should be observed deliberately rather than retried automatically.
+  */
+  if (reset_command_requested) {
+    reset_command_requested = false;
+    transmit_can_frame(&SUNWODA_RESET_COMMAND);
+  }
 }

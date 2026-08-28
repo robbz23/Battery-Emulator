@@ -120,8 +120,13 @@ class Battery {
   // visible (instead of a single toggle). Used by batteries where balancing is a latching request.
   virtual bool supports_balancing_request() { return false; }
   virtual bool supports_isolation_test() { return false; }
+  // Generic hook for a battery-specific one-shot "reset" style command that doesn't fit any of
+  // the more specific reset_* methods above. First used by SunwodaBattery's experimental BCMU
+  // Reset Command.
+  virtual bool supports_reset_command() { return false; }
 
   virtual void request_isolation_test() {}
+  virtual void request_reset_command() {}
   virtual void clear_isolation() {}
   virtual void calibrate_SOC() {}
   virtual void reset_BMS() {}
