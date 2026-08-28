@@ -105,6 +105,10 @@ class Battery {
   virtual bool supports_calibrate_SOC() { return false; }
   virtual bool supports_contactor_close() { return false; }
   virtual bool supports_contactor_reset() { return false; }
+  // Separate hook for batteries that expose an independently commandable precharge contactor
+  // (distinct from the main contactor covered by supports_contactor_close() above). First used by
+  // SunwodaBattery's Contactor Control object (address 71 / gCtrlInfo_71).
+  virtual bool supports_precharge_contactor_control() { return false; }
   virtual bool supports_set_fake_voltage() { return false; }
   virtual bool supports_manual_balancing() { return false; }
   virtual bool supports_real_BMS_status() { return false; }
@@ -140,6 +144,8 @@ class Battery {
   virtual void reset_BECM() {}
   virtual void request_open_contactors() {}
   virtual void request_close_contactors() {}
+  virtual void request_close_precharge_contactor() {}
+  virtual void request_open_precharge_contactor() {}
   virtual void toggle_SOC_method() {}
   virtual void reset_energy_saving_mode() {}
   virtual void set_factory_mode() {}

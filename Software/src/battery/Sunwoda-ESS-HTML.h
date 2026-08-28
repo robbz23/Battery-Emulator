@@ -52,6 +52,15 @@ struct SunwodaExtendedData {
   // identified - best-effort inference, not confirmed from the vendor documentation.
   uint16_t softwareVersion = 0;
   uint16_t hardwareVersion = 0;
+
+  // Individual temperature sensor readings, 0x0C50FF57 (gTempArray_87 - not in either vendor
+  // document, identified from a real CAN capture: same 3-values-per-frame/sequential-start-index
+  // layout as ID_CELL_VOLTAGE_0 at 0x0C50FF55, with values in the same 0.1 degC units as the min/
+  // max readings at 0x0C50FF52, so this is assumed to be a per-sensor breakdown of that summary).
+  // Not confirmed against vendor documentation - treat as best-effort.
+  static const uint8_t MAX_TEMP_SENSORS = 64;
+  int16_t temperatures_dC[MAX_TEMP_SENSORS] = {0};
+  uint8_t temp_sensor_count = 0;
 };
 
 // Bit names for gAlarmInfo_52 / gFaultInfo_53, indexed [subindex][bit]. nullptr = unused/reserved.
@@ -145,6 +154,17 @@ class SunwodaHtmlRenderer : public BatteryHtmlRenderer {
 
     content += list_active_bits("Active alarms", data->alarmWords, SUNWODA_ALARM_BIT_NAMES);
     content += list_active_bits("Active faults", data->faultWords, SUNWODA_FAULT_BIT_NAMES);
+
+    if (data->temp_sensor_count > 0) {
+      int16_t min_dC = data->temperatures_dC[0];
+      int16_t max_dC = data->temperatures_dC[0];
+      for (uint8_t i = 1; i < data->temp_sensor_count; i++) {
+        min_dC = min(min_dC, data->temperatures_dC[i]);
+        max_dC = max(max_dC, data->temperatures_dC[i]);
+      }
+      content += "<h4>Temperature sensors (" + String(data->temp_sensor_count) + "): " +
+                 String(min_dC / 10.0f, 1) + " - " + String(max_dC / 10.0f, 1) + " &deg;C</h4>";
+    }
 
     return content;
   }

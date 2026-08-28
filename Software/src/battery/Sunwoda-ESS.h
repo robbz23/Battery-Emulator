@@ -37,6 +37,16 @@ class SunwodaBattery : public CanBattery {
   bool supports_reset_command() override { return true; }
   void request_reset_command() override { reset_command_requested = true; }
 
+  // Experimental, manually-triggered Main/Precharge contactor control - see ID_CONTACTOR_CONTROL
+  // below for details and caveats. Main contactor reuses Battery.h's generic contactor-close hook;
+  // precharge uses the newer, Sunwoda-specific precharge hook.
+  bool supports_contactor_close() override { return true; }
+  void request_close_contactors() override { main_contactor_close_requested = true; }
+  void request_open_contactors() override { main_contactor_open_requested = true; }
+  bool supports_precharge_contactor_control() override { return true; }
+  void request_close_precharge_contactor() override { precharge_contactor_close_requested = true; }
+  void request_open_precharge_contactor() override { precharge_contactor_open_requested = true; }
+
  private:
   SunwodaExtendedData extended_data;
   SunwodaHtmlRenderer renderer = SunwodaHtmlRenderer(&extended_data);
@@ -55,6 +65,11 @@ class SunwodaBattery : public CanBattery {
   static const uint32_t ID_VOLT_CHARA = SUNWODA_BASE_ID + 0x51;      // gVoltChara_81
   static const uint32_t ID_TEMP_CHARA = SUNWODA_BASE_ID + 0x52;      // gTempChara_82
   static const uint32_t ID_CELL_VOLTAGE_0 = SUNWODA_BASE_ID + 0x55;  // gCellVolt_85 (cells 1-252, mV)
+
+  // Individual temperature sensor readings, gTempArray_87. See the comment on
+  // SunwodaExtendedData::temperatures_dC in Sunwoda-ESS-HTML.h for how this was identified -
+  // not confirmed against vendor documentation, only a real CAN capture.
+  static const uint32_t ID_TEMP_ARRAY_0 = SUNWODA_BASE_ID + 0x57;
 
   // Software/hardware version info. Not part of the gXxxInfo_NN / 0x0C50FF00+address family
   // above - the vendor's variable map (tools/SoftwareAddresses.txt) lists these as "Software
@@ -80,6 +95,21 @@ class SunwodaBattery : public CanBattery {
   // exposed as a manual, on-demand button only (never sent automatically) so it can be tried and
   // observed deliberately rather than blindly retried like the other commands in this file.
   static const uint32_t ID_RESET_COMMAND = 0x09E0FFFF;
+
+  // "Contactor Control" object (gCtrlInfo_71, address 71 - separate from ID_SYSTEM_CONTROL/gCtrlInfo_70
+  // at address 70 above). Found live via the vendor's own diagnostic tool (same tool that reads the
+  // vendor CAN variable map xlsx to label its fields): a 4-word RW object, one U16 per contactor -
+  // subindex 0 Main, 1 Precharge, 2 Intermediate, 3 Fan. Documented encoding per word: 0x00F0 = Normal
+  // engagement, 0x000F = Normal disengagement, 0xFFF0 = Forced engagement (bypasses safety interlocks),
+  // 0xFF0F = Forced disengagement. Only the Normal engagement/disengagement codes are used here -
+  // the Forced variants are intentionally not implemented since bypassing safety interlocks on real
+  // contactor hardware needs an explicit, separate decision, not a default button.
+  //
+  // The write frame's exact byte layout (mux marker, DLC) is NOT yet confirmed against a real packet
+  // capture - it is inferred from the same single-subindex-write convention already used for
+  // SUNWODA_CONTACTOR_SELFTEST_COMMAND above (mux 0x41 = "1 word starting at the given subindex").
+  // Verify with a real CAN capture of the vendor tool's read of this object before relying on this.
+  static const uint32_t ID_CONTACTOR_CONTROL = SUNWODA_BASE_ID + 71;  // 0x0C50FF47
 
   /*
   Start command (gCtrlInfo_70 / System control commands, 0x0C50FF46). Confirmed from the vendor's
@@ -134,6 +164,35 @@ class SunwodaBattery : public CanBattery {
                                      .ID = ID_RESET_COMMAND,
                                      .data = {0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
   bool reset_command_requested = false;
+
+  // See the long comment on ID_CONTACTOR_CONTROL above. Each frame writes exactly one subindex
+  // (mux 0x41, same convention as SUNWODA_CONTACTOR_SELFTEST_COMMAND): sub0 = Main contactor,
+  // sub1 = Precharge contactor. Value is little-endian: 0x00F0 = Normal engagement (close),
+  // 0x000F = Normal disengagement (open). Sent exactly once per button press, never automatically.
+  CAN_frame SUNWODA_MAIN_CONTACTOR_CLOSE = {.FD = false,
+                                            .ext_ID = true,
+                                            .DLC = 4,
+                                            .ID = ID_CONTACTOR_CONTROL,
+                                            .data = {0x41, 0x00, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00}};
+  CAN_frame SUNWODA_MAIN_CONTACTOR_OPEN = {.FD = false,
+                                           .ext_ID = true,
+                                           .DLC = 4,
+                                           .ID = ID_CONTACTOR_CONTROL,
+                                           .data = {0x41, 0x00, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00}};
+  CAN_frame SUNWODA_PRECHARGE_CONTACTOR_CLOSE = {.FD = false,
+                                                 .ext_ID = true,
+                                                 .DLC = 4,
+                                                 .ID = ID_CONTACTOR_CONTROL,
+                                                 .data = {0x41, 0x01, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00}};
+  CAN_frame SUNWODA_PRECHARGE_CONTACTOR_OPEN = {.FD = false,
+                                                .ext_ID = true,
+                                                .DLC = 4,
+                                                .ID = ID_CONTACTOR_CONTROL,
+                                                .data = {0x41, 0x01, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00}};
+  bool main_contactor_close_requested = false;
+  bool main_contactor_open_requested = false;
+  bool precharge_contactor_close_requested = false;
+  bool precharge_contactor_open_requested = false;
 
   // Decoded values, applied to the datalayer in update_values()
   float packVoltage = 0.0f;

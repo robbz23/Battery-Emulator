@@ -343,6 +343,28 @@ void SunwodaBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
 
     } break;
 
+    case ID_TEMP_ARRAY_0: {  // 0x0C50FF57 - Individual temperature sensors, 3 per frame, 0.1 degC
+
+      if (rx_frame.DLC < 8) {
+        break;
+      }
+
+      uint8_t start_index = rx_frame.data.u8[1];  // 0-based sensor index of the first sensor in this frame
+
+      for (uint8_t i = 0; i < 3; i++) {
+        uint8_t sensor_index = start_index + i;
+        if (sensor_index >= SunwodaExtendedData::MAX_TEMP_SENSORS) {
+          continue;
+        }
+        int16_t temp_dC = (int16_t)u16(&rx_frame.data.u8[2 + i * 2]);
+        extended_data.temperatures_dC[sensor_index] = temp_dC;
+        if ((uint8_t)(sensor_index + 1) > extended_data.temp_sensor_count) {
+          extended_data.temp_sensor_count = sensor_index + 1;
+        }
+      }
+
+    } break;
+
     case ID_SOFTWARE_VERSION:  // 0x0C506E07 - Software version number (see comment in Sunwoda-ESS.h)
 
       if (rx_frame.DLC < 4) {
@@ -431,5 +453,28 @@ void SunwodaBattery::transmit_can(unsigned long currentMillis) {
   if (reset_command_requested) {
     reset_command_requested = false;
     transmit_can_frame(&SUNWODA_RESET_COMMAND);
+  }
+
+  /*
+  Experimental Main/Precharge contactor control (0x0C50FF47): see the comment on
+  ID_CONTACTOR_CONTROL in Sunwoda-ESS.h. User-triggered only (advanced battery page), sent exactly
+  once per press, same rationale as the Reset Command above - unverified against a real packet
+  capture, so it should be tried and observed deliberately.
+  */
+  if (main_contactor_close_requested) {
+    main_contactor_close_requested = false;
+    transmit_can_frame(&SUNWODA_MAIN_CONTACTOR_CLOSE);
+  }
+  if (main_contactor_open_requested) {
+    main_contactor_open_requested = false;
+    transmit_can_frame(&SUNWODA_MAIN_CONTACTOR_OPEN);
+  }
+  if (precharge_contactor_close_requested) {
+    precharge_contactor_close_requested = false;
+    transmit_can_frame(&SUNWODA_PRECHARGE_CONTACTOR_CLOSE);
+  }
+  if (precharge_contactor_open_requested) {
+    precharge_contactor_open_requested = false;
+    transmit_can_frame(&SUNWODA_PRECHARGE_CONTACTOR_OPEN);
   }
 }

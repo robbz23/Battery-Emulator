@@ -51,6 +51,16 @@ std::vector<BatteryCommand> battery_commands = {
      [](Battery* b) { return b && b->supports_contactor_close(); }, [](Battery* b) { b->request_close_contactors(); }},
     {"contactorOpen", "Open Contactors", "a contactor open request?",
      [](Battery* b) { return b && b->supports_contactor_close(); }, [](Battery* b) { b->request_open_contactors(); }},
+    {"prechargeContactorClose", "Close Precharge Contactor (experimental)",
+     "send a precharge contactor close request (CAN ID 0x0C50FF47)? This is unverified against real "
+     "hardware - only try this if you know what you are doing.",
+     [](Battery* b) { return b && b->supports_precharge_contactor_control(); },
+     [](Battery* b) { b->request_close_precharge_contactor(); }},
+    {"prechargeContactorOpen", "Open Precharge Contactor (experimental)",
+     "send a precharge contactor open request (CAN ID 0x0C50FF47)? This is unverified against real "
+     "hardware - only try this if you know what you are doing.",
+     [](Battery* b) { return b && b->supports_precharge_contactor_control(); },
+     [](Battery* b) { b->request_open_precharge_contactor(); }},
     {"resetSOH", "Reset degradation data", "reset degradation data?",
      [](Battery* b) { return b && b->supports_reset_SOH(); }, [](Battery* b) { b->reset_SOH(); }},
     {"setFactoryMode", "Set Factory Mode", "set factory mode and disable isolation measurement?",
