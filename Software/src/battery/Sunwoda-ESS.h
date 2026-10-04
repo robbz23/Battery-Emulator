@@ -18,6 +18,27 @@ CAN speed is not confirmed from the vendor documentation. 500kbit/s is assumed a
 starting point (most common default); change CAN_Speed below if the battery does not
 appear on the bus.
 */
+/*
+Addressing helpers. These live at file scope rather than inside the class because a constexpr
+member function cannot be used in a constant initialiser within its own class definition.
+  priority | source node | destination node | object     (the BCMU is node 0x50)
+  0x10 = read request, 0x12 = the BCMU's reply, 0x14 = write.
+*/
+static constexpr uint8_t NODE_ADDR_BCMU = 0x50;
+static constexpr uint8_t NODE_ADDR_SELF = 0x64;
+static constexpr uint32_t request_id(uint8_t object) {
+  return 0x10000000UL | ((uint32_t)NODE_ADDR_SELF << 16) | ((uint32_t)NODE_ADDR_BCMU << 8) | object;
+}
+static constexpr uint32_t response_id(uint8_t object) {
+  return 0x12000000UL | ((uint32_t)NODE_ADDR_BCMU << 16) | ((uint32_t)NODE_ADDR_SELF << 8) | object;
+}
+static constexpr uint32_t write_id(uint8_t object) {
+  return 0x04000000UL | ((uint32_t)NODE_ADDR_SELF << 16) | ((uint32_t)NODE_ADDR_BCMU << 8) | object;
+}
+static constexpr uint32_t write_ack_id(uint8_t object) {
+  return 0x06000000UL | ((uint32_t)NODE_ADDR_BCMU << 16) | ((uint32_t)NODE_ADDR_SELF << 8) | object;
+}
+
 class SunwodaBattery : public CanBattery {
  public:
   SunwodaBattery() : CanBattery(CAN_Speed::CAN_SPEED_500KBPS) {}
@@ -31,21 +52,19 @@ class SunwodaBattery : public CanBattery {
 
   BatteryHtmlRenderer& get_status_renderer() { return renderer; }
 
-  // Experimental, manually-triggered "Reset Command" - see SUNWODA_RESET_COMMAND below for
-  // details and caveats. Exposed as a button on the advanced battery page via Battery.h's generic
-  // supports_reset_command()/request_reset_command() hook.
-  bool supports_reset_command() override { return true; }
-  void request_reset_command() override { reset_command_requested = true; }
+  // Manual contactor control buttons on the advanced battery page - see ID_CONTACTOR_CONTROL below.
+  // Closing is only ever a deliberate button press; opening also happens automatically on any
+  // alarm or fault (check_auto_open()).
+  bool supports_vendor_command(const char* identifier) override {
+    return find_vendor_command(identifier) != nullptr || strcmp(identifier, CMD_OPEN_ALL) == 0;
+  }
+  void request_vendor_command(const char* identifier) override;
+  static constexpr const char* CMD_OPEN_ALL = "swOpenAll";
 
-  // Experimental, manually-triggered Main/Precharge contactor control - see ID_CONTACTOR_CONTROL
-  // below for details and caveats. Main contactor reuses Battery.h's generic contactor-close hook;
-  // precharge uses the newer, Sunwoda-specific precharge hook.
-  bool supports_contactor_close() override { return true; }
-  void request_close_contactors() override { main_contactor_close_requested = true; }
-  void request_open_contactors() override { main_contactor_open_requested = true; }
-  bool supports_precharge_contactor_control() override { return true; }
-  void request_close_precharge_contactor() override { precharge_contactor_close_requested = true; }
-  void request_open_precharge_contactor() override { precharge_contactor_open_requested = true; }
+  // Manually-triggered RTC time sync, time supplied by the browser - see ID_TIME_SYNC below.
+  bool supports_time_sync() override { return true; }
+  void request_time_sync(uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute,
+                         uint16_t ms_in_minute) override;
 
  private:
   SunwodaExtendedData extended_data;
@@ -54,9 +73,69 @@ class SunwodaBattery : public CanBattery {
   // Base CAN ID for the BCMU broadcast frames. Actual IDs are this + <address>.
   static const uint32_t SUNWODA_BASE_ID = 0x0C50FF00;
 
+  /*
+  ADDRESSING - confirmed 2026-09-24 from a capture of the vendor's own tool talking to a real BCMU.
+
+  The 29-bit ID is NOT "a base plus the object address". It is four bytes:
+
+      priority | source node | destination node | object
+
+  The BCMU's own node address is 0x50, so every 0x0C50FFxx frame is the BCMU BROADCASTING
+  (src 0x50, dst 0xFF) its own telemetry. Those are fine to receive, and the ID_* constants below
+  that decode incoming status still use SUNWODA_BASE_ID for exactly that reason.
+
+  They are useless for commanding it. Transmitting 0x0C50FF46 means "I am the BCMU, broadcasting
+  object 0x46 to everyone" - which is why the BCMU never once replied to us and never acted on a
+  single command. To address the BCMU you send to dst 0x50 with your own address as src:
+
+      10 64 50 00   20 00 04                 read object 0x00, 4 subindexes starting at 0
+      12 50 64 00   63 00 B2 07 02 1A 10 33  BCMU replies: 0x07B2=1970, day 26/month 2, 16:51
+      12 50 64 00   A1 03 BC 87              ...continued: subindex 3, millisecond 0x87BC
+      10 64 50 36   20 00 01                 read object 0x36 (contactor self-test status)
+      12 50 64 36   E1 00 00 00              BCMU replies: value 0
+
+  Mux bit5 (0x20) marks an addressed request/response transaction; broadcasts have it clear.
+  Bit6 = FIRST frame, bit7 = LAST frame, low nibble = subindex count (see the block further down).
+  A read request is `20 <start_subindex> <count>`.
+
+  NODE_ADDR_SELF is deliberately 0x64 - the address the vendor's own tool uses. Impersonating it is
+  the one address we KNOW the BCMU answers, so it removes a variable while the ID format is still
+  being proven. The vendor tool must be disconnected while we use it, or the two will collide.
+  Once this is confirmed working, try moving to a free address (0x65 is a device on the BCMU's
+  internal channel 2, 0x50 is the BCMU itself, so something like 0x66 is the natural candidate).
+  */
+  static const uint8_t MUX_READ_REQUEST = 0x20;  // bit5 only: request, carries no data words
+  static const uint8_t MUX_TXN = 0x20;           // addressed request/response (always set)
+  static const uint8_t MUX_FIRST = 0x40;
+  static const uint8_t MUX_LAST = 0x80;
+  static const uint8_t MAX_WORDS_PER_FRAME = 3;  // 1 mux + 1 subindex + 3 u16 = DLC 8
+
+  /*
+  WRITE PROTOCOL - captured from the vendor's BMU-configuration tool and verified on hardware:
+
+      04 64 50 <obj>   C1 <subindex> <lo> <hi>    write one subindex (priority 0x04)
+      06 50 64 <obj>   C1 <subindex> <lo> <hi>    BCMU ack (priority 0x06)
+
+  The ack echoes the value the object holds AFTER the write, so an ack carrying the old value
+  means the write was refused (e.g. the read-only time object).
+  */
+
+  /*
+  RTC time sync, decoded from BCMU V1.16 firmware and verified on hardware 2026-09-25 (the BCMU's
+  clock went from 1970 to the sent time, and the EEPROM snapshot updated a minute later).
+
+  The time object (gOD0_Time) itself is read-only: a priority-0x04 write is acked with the OLD
+  value. Time is instead set by a broadcast at priority 0x00 - the dispatcher at 0x7F1001 switches
+  on the priority byte, and case 0x00 (0x7F1197) calls the time-sync receiver 0x7F3180. It only
+  requires that the frame arrives on the host bus and dst is 0xFF or the BCMU's address; the object
+  byte is not checked (0x00 is used for clarity). The payload is raw, with no mux/subindex:
+      [year lo][year hi][month][day][hour][minute][ms-in-minute lo][ms-in-minute hi]
+  */
+  static const uint32_t ID_TIME_SYNC = ((uint32_t)NODE_ADDR_SELF << 16) | (0xFFUL << 8) | 0x00;
+
   static const uint32_t ID_SYSTEM_STATUS = SUNWODA_BASE_ID + 0x32;   // gStateInfo_50
   static const uint32_t ID_SWITCH_STATUS = SUNWODA_BASE_ID + 0x33;   // gIoSwhInfo_51 (contactors)
-  static const uint32_t ID_SYSTEM_CONTROL = SUNWODA_BASE_ID + 0x46;  // gCtrlInfo_70 (host -> BCMU, RW)
+  static const uint32_t ID_SYSTEM_CONTROL = request_id(70);  // gCtrlInfo_70, addressed to the BCMU
   static const uint32_t ID_ALARM_INFO = SUNWODA_BASE_ID + 0x34;      // gAlarmInfo_52
   static const uint32_t ID_FAULT_INFO = SUNWODA_BASE_ID + 0x35;      // gFaultInfo_53
   static const uint32_t ID_CLUSTER_INFO = SUNWODA_BASE_ID + 0x36;    // gClusterInfo_54 (contactor self-test)
@@ -65,6 +144,7 @@ class SunwodaBattery : public CanBattery {
   static const uint32_t ID_VOLT_CHARA = SUNWODA_BASE_ID + 0x51;      // gVoltChara_81
   static const uint32_t ID_TEMP_CHARA = SUNWODA_BASE_ID + 0x52;      // gTempChara_82
   static const uint32_t ID_CELL_VOLTAGE_0 = SUNWODA_BASE_ID + 0x55;  // gCellVolt_85 (cells 1-252, mV)
+  static const uint32_t ID_CURRENT_LIMIT = SUNWODA_BASE_ID + 0x5A;   // gCurrLimit_90
 
   // Individual temperature sensor readings, gTempArray_87. See the comment on
   // SunwodaExtendedData::temperatures_dC in Sunwoda-ESS-HTML.h for how this was identified -
@@ -81,118 +161,100 @@ class SunwodaBattery : public CanBattery {
   static const uint32_t ID_SOFTWARE_VERSION = 0x0C506E07;
   static const uint32_t ID_HARDWARE_VERSION = 0x0C506E1D;
 
-  // "Reset Command", found in a second, older vendor document (tools/CAN protocol of control box -
-  // 20191029 - EN.xlsx, "BCMU(control box) CAN protocol" sheet). Uses a completely different CAN ID
-  // structure than the gXxxInfo_NN / 0x0C50FF00+address family above (Head=0x09, Source=0xE0,
-  // Destination=0xFF/broadcast, Tail=0xFF), and is NOT part of the 2021 "4BMU FerroAMP" document that
-  // ID_SYSTEM_CONTROL (the Start command) was sourced from - nor does that 2021 document mention this
-  // ID at all. Conversely, this 2019 document does not mention ID_SYSTEM_CONTROL/the Start command.
-  //
-  // This is the only host->BCMU write example given in the 2019 document, and our Start command has
-  // not shown any observable effect on real hardware so far (operatingStatus stuck at Stop despite
-  // repeated sends - see the comment on SUNWODA_START_COMMAND below). It is plausible this Reset
-  // Command is what is actually needed to get the BCMU going, but this is unverified - hence it is
-  // exposed as a manual, on-demand button only (never sent automatically) so it can be tried and
-  // observed deliberately rather than blindly retried like the other commands in this file.
-  static const uint32_t ID_RESET_COMMAND = 0x09E0FFFF;
+  /*
+  MANUAL CONTACTOR CONTROL - verified on hardware 2026-09-25 (HWv2 / ES01 running BCMU V1.16).
 
-  // "Contactor Control" object (gCtrlInfo_71, address 71 - separate from ID_SYSTEM_CONTROL/gCtrlInfo_70
-  // at address 70 above). Found live via the vendor's own diagnostic tool (same tool that reads the
-  // vendor CAN variable map xlsx to label its fields): a 4-word RW object, one U16 per contactor -
-  // subindex 0 Main, 1 Precharge, 2 Intermediate, 3 Fan. Documented encoding per word: 0x00F0 = Normal
-  // engagement, 0x000F = Normal disengagement, 0xFFF0 = Forced engagement (bypasses safety interlocks),
-  // 0xFF0F = Forced disengagement. Only the Normal engagement/disengagement codes are used here -
-  // the Forced variants are intentionally not implemented since bypassing safety interlocks on real
-  // contactor hardware needs an explicit, separate decision, not a default button.
-  //
-  // The write frame's exact byte layout (mux marker, DLC) is NOT yet confirmed against a real packet
-  // capture - it is inferred from the same single-subindex-write convention already used for
-  // SUNWODA_CONTACTOR_SELFTEST_COMMAND above (mux 0x41 = "1 word starting at the given subindex").
-  // Verify with a real CAN capture of the vendor tool's read of this object before relying on this.
-  static const uint32_t ID_CONTACTOR_CONTROL = SUNWODA_BASE_ID + 71;  // 0x0C50FF47
+  Contactor control is object 71 (gSwitchCtrl_71). One U16 per contactor, per the vendor sheet:
+      71/0 main (positive)   71/1 precharge   71/2 "intermediate" = the NEGATIVE contactor   71/3 fan
+  Codes: 0x00F0 normal engage, 0x000F normal disengage (0xFFF0/0xFF0F "forced" are not used here).
+
+  Preconditions, from the V1.16 write handlers (object 70 at 0x7F94A5, object 71 at 0x7F951A):
+    - Config parameter 1008 "Enable communication with BSMU" (EEPROM 0x13F3F0, RAM 0x0F8758) must be
+      1, otherwise every object-70/71 write is ACKed and then silently dropped. It cannot be set over
+      CAN (the config object refuses writes) - it has to be set once in EEPROM over BDM.
+    - Work mode must be 8 "Debugging" (70/1 = 8). The mode switch is only accepted from Normal mode
+      and outside Initialization; resending it while already in Debugging is harmless.
+    - Not while the BCMU's own contactor sequence is busy (RAM 0x2E08).
+  So every close is sent as 70/1 = 8 followed by the 71 write (request_vendor_command()).
+  Contactor feedback arrives on ID_SWITCH_STATUS (0x0C50FF33) about once per second.
+  */
+  static const uint32_t ID_CONTACTOR_CONTROL = request_id(71);  // gSwitchCtrl_71
+  static const uint16_t CONTACTOR_ENGAGE = 0x00F0;
+  static const uint16_t CONTACTOR_DISENGAGE = 0x000F;
+
+  struct VendorCommandDef {
+    const char* identifier;  // matches the button/route identifier in advanced_battery_html.cpp
+    uint32_t can_id;         // low byte = object number
+    uint8_t subindex;
+    uint16_t value;
+  };
+  static const VendorCommandDef VENDOR_COMMANDS[];
+  static const uint8_t VENDOR_COMMAND_COUNT;
+  static const VendorCommandDef CMD_DEBUG_MODE;  // 70/1 = 8, sent before every close
+  static const VendorCommandDef CMD_MAIN_OPEN, CMD_PRECHARGE_OPEN, CMD_NEGATIVE_OPEN;
+  static const VendorCommandDef* find_vendor_command(const char* identifier);
+
+  // Pending writes, oldest first; transmit_can() sends one per call. Overflow drops the newest.
+  static const uint8_t VENDOR_COMMAND_QUEUE_SIZE = 8;
+  const VendorCommandDef* vendor_command_queue[VENDOR_COMMAND_QUEUE_SIZE] = {};
+  uint8_t vendor_command_queue_count = 0;
+  bool enqueue_vendor_command(const VendorCommandDef* cmd);
 
   /*
-  Start command (gCtrlInfo_70 / System control commands, 0x0C50FF46). Confirmed from the vendor's
-  BCMU_APP CAN variable map (tools/_current_status.txt row 22-27, "Current status" sheet): subindex 0
-  is "Working status control" (0=Start, 1=Stop, 2=Emergency Stop, 4=Clear Fault), RW, sent on-demand
-  by the host (period=0), not broadcast periodically like the gXxxInfo_NN status frames.
-
-  A real capture (tools/pcanOut.txt) shows the pack sitting at "Battery protection status: Standby"
-  / "Operating status: Stop" for the whole ~5.5s log with contactors open (0x0C50FF33 output switch
-  status stuck at 0x0000) and this ID never transmitted by anything - i.e. nothing had ever told the
-  BCMU to start, which is consistent with contactors never closing. Sending this Start command is a
-  best-effort inference: the vendor doc does not show an example write frame, so the byte layout below
-  mirrors the read-side multiplex convention (mux 0x43 = subindex 0-2 in one frame) rather than being
-  independently confirmed. Verify on real hardware (watch operatingStatus on the advanced battery page)
-  before relying on it.
+  CAN SPEED AUTO-DETECT. BCMU V1.16 runs the host bus at 500 kbit/s, V4.04 at 250 kbit/s (verified
+  2026-09-28 on both boards; the frames are otherwise identical). We start at 500k and, whenever
+  nothing has been heard from the BCMU (source node 0x50) for CAN_SPEED_PROBE_MS, switch to the other
+  speed and keep alternating until it is heard. A node at the wrong speed error-flags every frame,
+  so nothing is transmitted on purpose until the BCMU has been heard at the current speed.
+  Disabled while the BCMU shares the native bus with a 500k inverter: flipping the shared port to
+  250k would cut the inverter off. A V4.04 BCMU is switched to 500k over BDM for now.
   */
-  CAN_frame SUNWODA_START_COMMAND = {.FD = false,
-                                     .ext_ID = true,
-                                     .DLC = 8,
-                                     .ID = ID_SYSTEM_CONTROL,
-                                     .data = {0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
-  //                                          ^mux  ^sub0  ^--Start=0--  ^--mode=Normal--  ^--ctrl=Remote--
-  unsigned long previousMillisStartCommand = 0;
-  static const unsigned long START_COMMAND_INTERVAL_MS = 1000;
+  static const bool CAN_SPEED_AUTODETECT = false;
+  static const unsigned long CAN_SPEED_PROBE_MS = 3000;
+  static const unsigned long BCMU_LINK_TIMEOUT_MS = 2000;
+  unsigned long last_bcmu_rx_ms = 0;
+  unsigned long last_speed_switch_ms = 0;
+  bool can_at_250k = false;
+  void autodetect_can_speed(unsigned long currentMillis);
+  bool bcmu_link_up(unsigned long currentMillis) const {
+    return last_bcmu_rx_ms != 0 && currentMillis - last_bcmu_rx_ms < BCMU_LINK_TIMEOUT_MS;
+  }
+
+  // Drops any pending writes (including closes) and queues main, precharge and negative open.
+  void open_all_contactors();
+
+  // Opens every contactor while any alarm or fault is active and any contactor reports closed,
+  // but only after a contactor was closed with the manual buttons (manual_control). When the BCMU
+  // self-starts, its own protection decides; standing alarms (equalization, undervoltage) would
+  // otherwise open a normally running pack every second.
+  // Repeated at most once per AUTO_OPEN_INTERVAL_MS until the feedback shows all open.
+  void check_auto_open();
+  bool manual_control = false;
+  static const unsigned long AUTO_OPEN_INTERVAL_MS = 1000;
+  unsigned long last_auto_open_ms = 0;
 
   /*
-  Contactor self-test command (gCtrlInfo_70 subindex 3, "Contactor control"). Confirmed from the
-  vendor's BCMU_APP CAN variable map ("Current status" sheet, row 26): 0 = Contactor self-test,
-  1 = Contactor isolation. This is a separate RW field within the same gCtrlInfo_70 object as the
-  Start command above, so the write frame below mirrors the same inferred mux convention: mux low
-  nibble = word count in this frame (here 1, since only subindex 3 is written), byte1 = start
-  subindex (3). As with SUNWODA_START_COMMAND, the exact write byte layout is not confirmed by the
-  vendor doc (which only documents the read-side broadcast format) - verify on real hardware by
-  watching contactor_selftest_status on the advanced battery page.
+  Multiplex byte format, confirmed 2026-09-24 by decoding the BCMU's own broadcasts against the
+  subindex counts in its firmware TX schedule table (flash 0x7FD311):
+
+      data[0] = mux:  bit6 (0x40) = FIRST frame of the transfer
+                      bit7 (0x80) = LAST  frame of the transfer
+                      low nibble  = number of subindexes carried in this frame
+      data[1] = starting subindex
+      data[2..] = one little-endian u16 per subindex
+
+  Worked examples straight off the bus - object 0x36 has 1 subindex and is sent as a single
+  "C1 00 ..", object 0x34 has 4 and is sent as "43 00 .." (first, 3 items) then "81 03 .."
+  (last, 1 item), object 0x5B has 7 and is sent as "43 00" / "03 03" / "81 06".
+
+  So a complete write of one subindex is mux 0xC1 - FIRST and LAST set. We previously sent 0x41,
+  which announces the first frame of a multi-frame transfer and promises a continuation that
+  never arrived, so the BCMU never committed any of it. That is why no control command ever took
+  effect, and why the BCMU never once answered a read request in an 88 s capture.
   */
-  CAN_frame SUNWODA_CONTACTOR_SELFTEST_COMMAND = {.FD = false,
-                                                  .ext_ID = true,
-                                                  .DLC = 4,
-                                                  .ID = ID_SYSTEM_CONTROL,
-                                                  .data = {0x41, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
-  //                                                       ^mux  ^sub3  ^--self-test=0--
-  unsigned long previousMillisSelfTestCommand = 0;
-  static const unsigned long SELFTEST_COMMAND_INTERVAL_MS = 1000;
-
-  // See the long comment on ID_RESET_COMMAND above. Data bytes taken verbatim from the 2019
-  // document's only host->BCMU write example - not independently confirmed against real hardware.
-  // Sent exactly once per button press (see request_reset_command()/transmit_can()), never
-  // automatically/repeatedly like the two commands above, since its effect is unverified.
-  CAN_frame SUNWODA_RESET_COMMAND = {.FD = false,
-                                     .ext_ID = true,
-                                     .DLC = 8,
-                                     .ID = ID_RESET_COMMAND,
-                                     .data = {0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
-  bool reset_command_requested = false;
-
-  // See the long comment on ID_CONTACTOR_CONTROL above. Each frame writes exactly one subindex
-  // (mux 0x41, same convention as SUNWODA_CONTACTOR_SELFTEST_COMMAND): sub0 = Main contactor,
-  // sub1 = Precharge contactor. Value is little-endian: 0x00F0 = Normal engagement (close),
-  // 0x000F = Normal disengagement (open). Sent exactly once per button press, never automatically.
-  CAN_frame SUNWODA_MAIN_CONTACTOR_CLOSE = {.FD = false,
-                                            .ext_ID = true,
-                                            .DLC = 4,
-                                            .ID = ID_CONTACTOR_CONTROL,
-                                            .data = {0x41, 0x00, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00}};
-  CAN_frame SUNWODA_MAIN_CONTACTOR_OPEN = {.FD = false,
-                                           .ext_ID = true,
-                                           .DLC = 4,
-                                           .ID = ID_CONTACTOR_CONTROL,
-                                           .data = {0x41, 0x00, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00}};
-  CAN_frame SUNWODA_PRECHARGE_CONTACTOR_CLOSE = {.FD = false,
-                                                 .ext_ID = true,
-                                                 .DLC = 4,
-                                                 .ID = ID_CONTACTOR_CONTROL,
-                                                 .data = {0x41, 0x01, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00}};
-  CAN_frame SUNWODA_PRECHARGE_CONTACTOR_OPEN = {.FD = false,
-                                                .ext_ID = true,
-                                                .DLC = 4,
-                                                .ID = ID_CONTACTOR_CONTROL,
-                                                .data = {0x41, 0x01, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00}};
-  bool main_contactor_close_requested = false;
-  bool main_contactor_open_requested = false;
-  bool precharge_contactor_close_requested = false;
-  bool precharge_contactor_open_requested = false;
+  // Time broadcast built by request_time_sync(), sent once by transmit_can(). See ID_TIME_SYNC.
+  CAN_frame SUNWODA_TIME_SYNC = {.FD = false, .ext_ID = true, .DLC = 8, .ID = ID_TIME_SYNC, .data = {0}};
+  bool time_sync_requested = false;
 
   // Decoded values, applied to the datalayer in update_values()
   float packVoltage = 0.0f;
@@ -205,6 +267,15 @@ class SunwodaBattery : public CanBattery {
   uint16_t maxCellNumber = 0;
 
   int16_t minTemperature = 0;
+  int16_t packCurrent_dA = 0;  // datalayer convention: positive = charging
+  // gCurrLimit_90 subindices: charge current, discharge current (0.1 A), charge power,
+  // discharge power (0.1 kW). The BCMU reports all zero whenever it is not running.
+  uint16_t bmsLimits[4] = {0, 0, 0, 0};
+  // Charge-only limit offered while contactors are held closed manually (Debugging mode).
+  static const uint16_t RECOVERY_CHARGE_CURRENT_DA = 50;     // 5.0 A
+  static const uint16_t RECOVERY_CHARGE_MAX_CELL_MV = 3500;     // stop offering it at this (LFP)
+  static const uint16_t RECOVERY_CHARGE_RESUME_CELL_MV = 3350;  // ...and only resume below this
+  bool recovery_charge_blocked = false;
   int16_t maxTemperature = 0;
 
   uint8_t actual_cell_count = 0;

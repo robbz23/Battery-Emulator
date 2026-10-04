@@ -12,8 +12,9 @@ struct SungrowBatteryConfig {
 class SungrowInverter : public CanInverterProtocol {
  public:
   const char* name() override { return Name; }
-  // Constructor: request 250 kbps on the inverter CAN interface
-  SungrowInverter() : CanInverterProtocol(CAN_Speed::CAN_SPEED_250KBPS) {}
+  // Constructor: request 500 kbps on the inverter CAN interface. Verified 2026-10-03 on a Sungrow
+  // sharing the bus with a Sunwoda BCMU: its 0x102/0x151/0x191 frames decode cleanly at 500k.
+  SungrowInverter() : CanInverterProtocol(CAN_Speed::CAN_SPEED_500KBPS) {}
   bool setup() override;
   void update_values();
   void transmit_can(unsigned long currentMillis);

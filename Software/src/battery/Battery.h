@@ -105,10 +105,6 @@ class Battery {
   virtual bool supports_calibrate_SOC() { return false; }
   virtual bool supports_contactor_close() { return false; }
   virtual bool supports_contactor_reset() { return false; }
-  // Separate hook for batteries that expose an independently commandable precharge contactor
-  // (distinct from the main contactor covered by supports_contactor_close() above). First used by
-  // SunwodaBattery's Contactor Control object (address 71 / gCtrlInfo_71).
-  virtual bool supports_precharge_contactor_control() { return false; }
   virtual bool supports_set_fake_voltage() { return false; }
   virtual bool supports_manual_balancing() { return false; }
   virtual bool supports_real_BMS_status() { return false; }
@@ -124,13 +120,23 @@ class Battery {
   // visible (instead of a single toggle). Used by batteries where balancing is a latching request.
   virtual bool supports_balancing_request() { return false; }
   virtual bool supports_isolation_test() { return false; }
-  // Generic hook for a battery-specific one-shot "reset" style command that doesn't fit any of
-  // the more specific reset_* methods above. First used by SunwodaBattery's experimental BCMU
-  // Reset Command.
-  virtual bool supports_reset_command() { return false; }
+  // Generic hook for a battery-specific one-shot "set the BMS's real-time clock" command. The
+  // emulator has no clock of its own, so the time comes from the browser that pressed the button
+  // (local time). First used by SunwodaBattery's BCMU time sync.
+  virtual bool supports_time_sync() { return false; }
+  // Generic hook for battery-specific commands that are too numerous, or too vendor-specific, to
+  // each justify their own virtual method on this base class. The battery implementation owns the
+  // identifier namespace and decides at run time which identifiers it currently supports; the
+  // button/route list lives in advanced_battery_html.cpp like every other command. Identifiers are
+  // string literals with static storage duration (they double as the HTTP route name), so
+  // implementations may compare them with strcmp and must not retain the pointer beyond the call.
+  // First used by SunwodaBattery for the BCMU's manual contactor control (address 71 / gSwitchCtrl_71).
+  virtual bool supports_vendor_command(const char* identifier) { return false; }
 
   virtual void request_isolation_test() {}
-  virtual void request_reset_command() {}
+  virtual void request_time_sync(uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute,
+                                 uint16_t ms_in_minute) {}
+  virtual void request_vendor_command(const char* identifier) {}
   virtual void clear_isolation() {}
   virtual void calibrate_SOC() {}
   virtual void reset_BMS() {}
@@ -144,8 +150,6 @@ class Battery {
   virtual void reset_BECM() {}
   virtual void request_open_contactors() {}
   virtual void request_close_contactors() {}
-  virtual void request_close_precharge_contactor() {}
-  virtual void request_open_precharge_contactor() {}
   virtual void toggle_SOC_method() {}
   virtual void reset_energy_saving_mode() {}
   virtual void set_factory_mode() {}

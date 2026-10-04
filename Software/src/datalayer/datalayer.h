@@ -294,7 +294,10 @@ struct DATALAYER_SHUNT_TYPE {
 
 struct DATALAYER_SYSTEM_INFO_TYPE {
   /** array with incoming CAN messages, for displaying on webserver */
-  char logged_can_messages[15000] = {0};
+  // Enlarged from 15000: at the Sunwoda bus rate 15 kB held only ~4 s of traffic, which was too
+  // short to capture a user-triggered event between clicking and exporting. 60 kB gives ~16 s.
+  // Note /export_can_log copies this whole buffer into a String, so this also costs transient heap.
+  char logged_can_messages[60000] = {0};
   /** array with type of battery used, for displaying on webserver */
   char battery_protocol[64] = {0};
   /** array with type of battery used, for displaying on webserver */

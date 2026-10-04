@@ -1,8 +1,10 @@
 #include "Sunwoda-ESS.h"
+#include <string.h>
 #include "../battery/BATTERIES.h"
 #include "../communication/contactorcontrol/comm_contactorcontrol.h"
 #include "../datalayer/datalayer.h"
 #include "../devboard/utils/events.h"
+#include "../devboard/utils/logging.h"
 
 /*
 Based on reverse engineering of the Sunwoda BCMU CAN variable map together with a real
@@ -39,6 +41,10 @@ void SunwodaBattery::update_values() {
 
   datalayer.battery.status.voltage_dV = (uint16_t)(packVoltage * 10);  // 622.1V -> 6221
 
+  datalayer.battery.status.current_dA = packCurrent_dA;  // positive = charging
+  datalayer.battery.status.active_power_W =
+      (int32_t)datalayer.battery.status.voltage_dV * datalayer.battery.status.current_dA / 100;
+
   datalayer.battery.status.cell_max_voltage_mV = maxCellVoltage;
   datalayer.battery.status.cell_min_voltage_mV = minCellVoltage;
 
@@ -52,9 +58,28 @@ void SunwodaBattery::update_values() {
   datalayer.battery.status.remaining_capacity_Wh = static_cast<uint32_t>(
       (static_cast<double>(datalayer.battery.status.real_soc) / 10000) * datalayer.battery.info.total_capacity_Wh);
 
-  //TODO: max_charge_power_W / max_discharge_power_W / current_dA have not been located
-  //in the CAN stream yet. Charge/discharge current limit and power limit live under
-  //gCurrLimit_90 (0x0C50FF5A) but the byte layout is not confirmed.
+  // BCMU limits from gCurrLimit_90 (0x0C50FF5A), verified 2026-10-03 against the vendor sheet
+  // and live data (HWv1 running: 201/201/61/61; HWv2 at SOC 0: 201/0/57/0).
+  datalayer.battery.status.max_charge_current_dA = bmsLimits[0];
+  datalayer.battery.status.max_discharge_current_dA = bmsLimits[1];
+  datalayer.battery.status.max_charge_power_W = (uint32_t)bmsLimits[2] * 100;
+  datalayer.battery.status.max_discharge_power_W = (uint32_t)bmsLimits[3] * 100;
+
+  // Recovery charge: after a manual close in Debugging mode (BCMU in Stop) the BCMU reports zero
+  // limits, so offer a small fixed charge (never discharge) until the highest cell nears full.
+  // Latched with hysteresis: once the highest cell reaches the cut-off, stay off until it has relaxed well
+  // below it, so a brief spike does not toggle the offer 0/5 A (the SH15T does not resume after a 0).
+  if (maxCellVoltage >= RECOVERY_CHARGE_MAX_CELL_MV) {
+    recovery_charge_blocked = true;
+  } else if (maxCellVoltage < RECOVERY_CHARGE_RESUME_CELL_MV) {
+    recovery_charge_blocked = false;
+  }
+  if (extended_data.operatingMode == 8 && extended_data.main_contactor_closed && !extended_data.faultActive &&
+      bmsLimits[0] == 0 && maxCellVoltage > 0 && !recovery_charge_blocked) {
+    datalayer.battery.status.max_charge_current_dA = RECOVERY_CHARGE_CURRENT_DA;
+    datalayer.battery.status.max_charge_power_W =
+        (uint32_t)RECOVERY_CHARGE_CURRENT_DA * datalayer.battery.status.voltage_dV / 100;
+  }
 
   /*
   Contactor closing policy:
@@ -86,9 +111,17 @@ void SunwodaBattery::update_values() {
   if (!contactor_control_enabled) {
     datalayer.system.status.dc_bus_live = extended_data.main_contactor_closed && !extended_data.faultActive;
   }
+
+  // Backstop for the per-frame check in the alarm/fault handlers.
+  check_auto_open();
 }
 
 void SunwodaBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
+  // Any frame whose source node is the BCMU proves the current CAN speed is right.
+  if (((rx_frame.ID >> 16) & 0xFF) == NODE_ADDR_BCMU) {
+    last_bcmu_rx_ms = millis();
+  }
+
   switch (rx_frame.ID) {
     case ID_MAIN_INFO:  // 0x0C50FF50 - Total voltage / current / power / SOC / SOH / avg temp
 
@@ -105,6 +138,9 @@ void SunwodaBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
       */
       if (rx_frame.data.u8[0] == 0x43) {
         packVoltage = (float)u16(&rx_frame.data.u8[2]) / 10.0f;
+        // Subindex 1: pack current, S16 0.1 A, negative while charging (verified 2026-10-03:
+        // -3.3 A while the inverter reported ~1 kW into the pack). The datalayer wants the opposite.
+        packCurrent_dA = -(int16_t)u16(&rx_frame.data.u8[4]);
       }
 
       /*
@@ -139,6 +175,19 @@ void SunwodaBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
       }
 
       break;
+
+    case ID_CURRENT_LIMIT: {  // 0x0C50FF5A - Charge/discharge current and power limits
+      // Mux byte: low nibble = word count, data[1] = first subindex, then u16 LE words.
+      const uint8_t count = rx_frame.data.u8[0] & 0x0F;
+      const uint8_t first = rx_frame.data.u8[1];
+      for (uint8_t i = 0; i < count; i++) {
+        const uint8_t sub = first + i;
+        if (sub < 4 && 2 + 2 * i + 1 < rx_frame.DLC) {
+          bmsLimits[sub] = u16(&rx_frame.data.u8[2 + 2 * i]);
+        }
+      }
+      break;
+    }
 
     case ID_TEMP_CHARA:  // 0x0C50FF52 - Temperature characteristics (lowest/highest)
 
@@ -283,6 +332,7 @@ void SunwodaBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
       } else {
         clear_event(EVENT_BATTERY_CAUTION);
       }
+      check_auto_open();
 
     } break;
 
@@ -315,6 +365,7 @@ void SunwodaBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
       } else {
         clear_event(EVENT_BATTERY_CHG_DISCHG_STOP_REQ);
       }
+      check_auto_open();
 
     } break;
 
@@ -409,72 +460,157 @@ void SunwodaBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
   }
 }
 
+/*
+Manual contactor control buttons - see the MANUAL CONTACTOR CONTROL comment in Sunwoda-ESS.h.
+The identifiers here must match the BatteryCommand identifiers in advanced_battery_html.cpp - that
+string is both the HTTP route and the key looked up here.
+*/
+const SunwodaBattery::VendorCommandDef SunwodaBattery::VENDOR_COMMANDS[] = {
+    {"swNegativeClose", ID_CONTACTOR_CONTROL, 2, CONTACTOR_ENGAGE},
+    {"swNegativeOpen", ID_CONTACTOR_CONTROL, 2, CONTACTOR_DISENGAGE},
+    {"swPrechargeClose", ID_CONTACTOR_CONTROL, 1, CONTACTOR_ENGAGE},
+    {"swPrechargeOpen", ID_CONTACTOR_CONTROL, 1, CONTACTOR_DISENGAGE},
+    {"swMainClose", ID_CONTACTOR_CONTROL, 0, CONTACTOR_ENGAGE},
+    {"swMainOpen", ID_CONTACTOR_CONTROL, 0, CONTACTOR_DISENGAGE},
+};
+
+const uint8_t SunwodaBattery::VENDOR_COMMAND_COUNT =
+    sizeof(SunwodaBattery::VENDOR_COMMANDS) / sizeof(SunwodaBattery::VENDOR_COMMANDS[0]);
+
+const SunwodaBattery::VendorCommandDef SunwodaBattery::CMD_DEBUG_MODE = {nullptr, ID_SYSTEM_CONTROL, 1, 8};
+const SunwodaBattery::VendorCommandDef SunwodaBattery::CMD_MAIN_OPEN = {nullptr, ID_CONTACTOR_CONTROL, 0,
+                                                                         CONTACTOR_DISENGAGE};
+const SunwodaBattery::VendorCommandDef SunwodaBattery::CMD_PRECHARGE_OPEN = {nullptr, ID_CONTACTOR_CONTROL, 1,
+                                                                              CONTACTOR_DISENGAGE};
+const SunwodaBattery::VendorCommandDef SunwodaBattery::CMD_NEGATIVE_OPEN = {nullptr, ID_CONTACTOR_CONTROL, 2,
+                                                                             CONTACTOR_DISENGAGE};
+
+const SunwodaBattery::VendorCommandDef* SunwodaBattery::find_vendor_command(const char* identifier) {
+  if (!identifier) {
+    return nullptr;
+  }
+  for (uint8_t i = 0; i < VENDOR_COMMAND_COUNT; i++) {
+    if (strcmp(VENDOR_COMMANDS[i].identifier, identifier) == 0) {
+      return &VENDOR_COMMANDS[i];
+    }
+  }
+  return nullptr;
+}
+
+bool SunwodaBattery::enqueue_vendor_command(const VendorCommandDef* cmd) {
+  if (vendor_command_queue_count >= VENDOR_COMMAND_QUEUE_SIZE) {
+    return false;
+  }
+  vendor_command_queue[vendor_command_queue_count++] = cmd;
+  return true;
+}
+
+void SunwodaBattery::request_vendor_command(const char* identifier) {
+  if (identifier && strcmp(identifier, CMD_OPEN_ALL) == 0) {
+    open_all_contactors();
+    return;
+  }
+  const VendorCommandDef* cmd = find_vendor_command(identifier);
+  if (!cmd) {
+    return;
+  }
+  if (cmd->value == CONTACTOR_ENGAGE) {
+    // Never close into an active alarm or fault - check_auto_open() would only open it again.
+    if (extended_data.alarmActive || extended_data.faultActive) {
+      return;
+    }
+    // Contactor writes are only honoured in Debugging work mode, so switch to it first.
+    if (vendor_command_queue_count + 2 > VENDOR_COMMAND_QUEUE_SIZE) {
+      return;
+    }
+    enqueue_vendor_command(&CMD_DEBUG_MODE);
+    manual_control = true;
+  }
+  enqueue_vendor_command(cmd);
+}
+
+void SunwodaBattery::open_all_contactors() {
+  vendor_command_queue_count = 0;  // drop anything pending, including closes
+  enqueue_vendor_command(&CMD_MAIN_OPEN);
+  enqueue_vendor_command(&CMD_PRECHARGE_OPEN);
+  enqueue_vendor_command(&CMD_NEGATIVE_OPEN);
+}
+
+void SunwodaBattery::check_auto_open() {
+  bool any_closed = extended_data.negative_contactor_closed || extended_data.main_contactor_closed ||
+                    extended_data.precharge_contactor_closed;
+  if (!any_closed) {
+    manual_control = false;  // everything open again: back to BCMU-managed operation
+  }
+  if (!manual_control || !(extended_data.alarmActive || extended_data.faultActive) || !any_closed) {
+    return;
+  }
+  unsigned long now = millis();
+  if (last_auto_open_ms != 0 && now - last_auto_open_ms < AUTO_OPEN_INTERVAL_MS) {
+    return;
+  }
+  last_auto_open_ms = now;
+  open_all_contactors();
+}
+
+void SunwodaBattery::autodetect_can_speed(unsigned long currentMillis) {
+  if (!CAN_SPEED_AUTODETECT) {
+    return;
+  }
+  if (last_bcmu_rx_ms != 0 && currentMillis - last_bcmu_rx_ms < CAN_SPEED_PROBE_MS) {
+    return;  // BCMU heard recently at this speed
+  }
+  if (currentMillis - last_speed_switch_ms < CAN_SPEED_PROBE_MS) {
+    return;  // give the current speed a full probe period
+  }
+  can_at_250k = !can_at_250k;
+  CAN_Speed speed = can_at_250k ? CAN_Speed::CAN_SPEED_250KBPS : CAN_Speed::CAN_SPEED_500KBPS;
+  change_can_speed(speed);
+  last_speed_switch_ms = currentMillis;
+  extended_data.can_speed_kbps = (uint16_t)speed;
+  logging.printf("Sunwoda: no BCMU frames, trying %d kbit/s\n", (int)speed);
+}
+
 void SunwodaBattery::transmit_can(unsigned long currentMillis) {
-  /*
-  Start command: see the long comment on SUNWODA_START_COMMAND in Sunwoda-ESS.h for the CAN
-  variable map reference and the caveat that this write frame's exact byte layout is inferred,
-  not confirmed. Sent repeatedly (rather than once) in case the BCMU ignores it while it is
-  still initializing, mirroring the retry style used elsewhere in this codebase for one-shot
-  BMS commands.
+  autodetect_can_speed(currentMillis);
+  if (!bcmu_link_up(currentMillis)) {
+    return;  // keep queued writes until the BCMU is heard at the current speed
+  }
 
-  Only sent while the pack is at Initialization (0) or Stop (1) - once it has moved on to
-  Starting/Running/Stopping there is nothing to (re)request, and while Fault (5) a Start command
-  would not help (would need Clear Fault instead, which is not sent automatically here since
-  auto-clearing a real fault without visibility into *why* it faulted is not safe to do blindly).
-  */
-  if (extended_data.operatingStatus == 0 || extended_data.operatingStatus == 1) {
-    if (currentMillis - previousMillisStartCommand >= START_COMMAND_INTERVAL_MS) {
-      previousMillisStartCommand = currentMillis;
-      transmit_can_frame(&SUNWODA_START_COMMAND);
+  // Queued object writes, one per call: ID 04 <us> 50 <object>, data C1 <subindex> <lo> <hi>.
+  if (vendor_command_queue_count > 0) {
+    const VendorCommandDef* cmd = vendor_command_queue[0];
+    for (uint8_t i = 1; i < vendor_command_queue_count; i++) {
+      vendor_command_queue[i - 1] = vendor_command_queue[i];
     }
+    vendor_command_queue_count--;
+
+    uint8_t object = (uint8_t)(cmd->can_id & 0xFF);
+    CAN_frame frame = {.FD = false,
+                       .ext_ID = true,
+                       .DLC = 4,
+                       .ID = write_id(object),
+                       .data = {(uint8_t)(MUX_FIRST | MUX_LAST | 1), cmd->subindex,
+                                (uint8_t)(cmd->value & 0xFF), (uint8_t)(cmd->value >> 8), 0x00, 0x00, 0x00, 0x00}};
+    transmit_can_frame(&frame);
   }
 
-  /*
-  Contactor self-test command: see the comment on SUNWODA_CONTACTOR_SELFTEST_COMMAND in
-  Sunwoda-ESS.h. Sent repeatedly (same retry rationale as the Start command above) until
-  contactor_selftest_status (0x0C50FF36) reports the self-test has completed. Only sent while
-  the pack is at Initialization/Stop - contactors are expected to be open at that point, which is
-  the safe/intended state to run a self-test in.
-  */
-  if (extended_data.contactor_selftest_status == 0 &&
-      (extended_data.operatingStatus == 0 || extended_data.operatingStatus == 1)) {
-    if (currentMillis - previousMillisSelfTestCommand >= SELFTEST_COMMAND_INTERVAL_MS) {
-      previousMillisSelfTestCommand = currentMillis;
-      transmit_can_frame(&SUNWODA_CONTACTOR_SELFTEST_COMMAND);
-    }
+  // RTC time sync broadcast, one frame per button press. See ID_TIME_SYNC in Sunwoda-ESS.h.
+  if (time_sync_requested) {
+    time_sync_requested = false;
+    transmit_can_frame(&SUNWODA_TIME_SYNC);
   }
+}
 
-  /*
-  Experimental Reset Command (0x09E0FFFF): see the comment on ID_RESET_COMMAND in Sunwoda-ESS.h.
-  Unlike the Start and self-test commands above, this is user-triggered only via the "More Battery
-  Info" page (request_reset_command()) and sent exactly once per press, since its effect on real
-  hardware is unverified and it should be observed deliberately rather than retried automatically.
-  */
-  if (reset_command_requested) {
-    reset_command_requested = false;
-    transmit_can_frame(&SUNWODA_RESET_COMMAND);
-  }
-
-  /*
-  Experimental Main/Precharge contactor control (0x0C50FF47): see the comment on
-  ID_CONTACTOR_CONTROL in Sunwoda-ESS.h. User-triggered only (advanced battery page), sent exactly
-  once per press, same rationale as the Reset Command above - unverified against a real packet
-  capture, so it should be tried and observed deliberately.
-  */
-  if (main_contactor_close_requested) {
-    main_contactor_close_requested = false;
-    transmit_can_frame(&SUNWODA_MAIN_CONTACTOR_CLOSE);
-  }
-  if (main_contactor_open_requested) {
-    main_contactor_open_requested = false;
-    transmit_can_frame(&SUNWODA_MAIN_CONTACTOR_OPEN);
-  }
-  if (precharge_contactor_close_requested) {
-    precharge_contactor_close_requested = false;
-    transmit_can_frame(&SUNWODA_PRECHARGE_CONTACTOR_CLOSE);
-  }
-  if (precharge_contactor_open_requested) {
-    precharge_contactor_open_requested = false;
-    transmit_can_frame(&SUNWODA_PRECHARGE_CONTACTOR_OPEN);
-  }
+void SunwodaBattery::request_time_sync(uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute,
+                                       uint16_t ms_in_minute) {
+  SUNWODA_TIME_SYNC.data.u8[0] = year & 0xFF;
+  SUNWODA_TIME_SYNC.data.u8[1] = year >> 8;
+  SUNWODA_TIME_SYNC.data.u8[2] = month;
+  SUNWODA_TIME_SYNC.data.u8[3] = day;
+  SUNWODA_TIME_SYNC.data.u8[4] = hour;
+  SUNWODA_TIME_SYNC.data.u8[5] = minute;
+  SUNWODA_TIME_SYNC.data.u8[6] = ms_in_minute & 0xFF;
+  SUNWODA_TIME_SYNC.data.u8[7] = ms_in_minute >> 8;
+  time_sync_requested = true;
 }

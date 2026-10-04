@@ -51,6 +51,7 @@ struct SunwodaExtendedData {
   // comment above ID_SOFTWARE_VERSION/ID_HARDWARE_VERSION in Sunwoda-ESS.h for how these were
   // identified - best-effort inference, not confirmed from the vendor documentation.
   uint16_t softwareVersion = 0;
+  uint16_t can_speed_kbps = 500;  // host bus speed currently in use (auto-detected)
   uint16_t hardwareVersion = 0;
 
   // Individual temperature sensor readings, 0x0C50FF57 (gTempArray_87 - not in either vendor
@@ -141,11 +142,12 @@ class SunwodaHtmlRenderer : public BatteryHtmlRenderer {
                lookup(chargeDischargeStatusNames, 3, data->chargeDischargeStatus) + "</h4>";
     if (data->operatingStatus == 0 || data->operatingStatus == 1) {
       content +=
-          "<h4 style='color:#ffb74d;'>The BCMU has not been sent a Start command yet - contactors stay open "
-          "until it reaches Running. battery-emulator sends this automatically; if this persists check the "
-          "CAN wiring/speed.</h4>";
+          "<h4 style='color:#ffb74d;'>The BCMU is not Running - contactors stay open. BCMU V4.04 starts on its "
+          "own about 30 s after power-up; if it stays here check the battery switch, precharge wiring and the "
+          "alarms below.</h4>";
     }
 
+    content += "<h4>CAN speed: " + String(data->can_speed_kbps) + " kbit/s (auto-detected)</h4>";
     content += "<h4>Software version: " + String(data->softwareVersion / 10.0f, 1) + "</h4>";
     content += "<h4>Hardware version: " + String(data->hardwareVersion / 10.0f, 1) + "</h4>";
 

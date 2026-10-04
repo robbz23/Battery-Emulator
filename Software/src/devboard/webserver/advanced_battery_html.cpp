@@ -5,6 +5,16 @@
 #include "../../datalayer/datalayer.h"
 #include "../../datalayer/datalayer_extended.h"
 
+// Builds a BatteryCommand backed by Battery's generic vendor-command hook. Used for commands that
+// are specific enough to one battery integration that giving each its own virtual on Battery would
+// bloat the base class - the identifier (which is also the HTTP route name) is written once here and
+// the battery implementation decides at run time whether it supports it.
+static BatteryCommand vendor_command(const char* identifier, const char* title, const char* prompt) {
+  return {identifier, title, prompt,
+          [identifier](Battery* b) { return b && b->supports_vendor_command(identifier); },
+          [identifier](Battery* b) { b->request_vendor_command(identifier); }};
+}
+
 // Available generic battery commands that are taken into use based on what the selected battery supports.
 std::vector<BatteryCommand> battery_commands = {
     {"clearIsolation", "Clear isolation fault", "clear any active isolation fault?",
@@ -51,16 +61,6 @@ std::vector<BatteryCommand> battery_commands = {
      [](Battery* b) { return b && b->supports_contactor_close(); }, [](Battery* b) { b->request_close_contactors(); }},
     {"contactorOpen", "Open Contactors", "a contactor open request?",
      [](Battery* b) { return b && b->supports_contactor_close(); }, [](Battery* b) { b->request_open_contactors(); }},
-    {"prechargeContactorClose", "Close Precharge Contactor (experimental)",
-     "send a precharge contactor close request (CAN ID 0x0C50FF47)? This is unverified against real "
-     "hardware - only try this if you know what you are doing.",
-     [](Battery* b) { return b && b->supports_precharge_contactor_control(); },
-     [](Battery* b) { b->request_close_precharge_contactor(); }},
-    {"prechargeContactorOpen", "Open Precharge Contactor (experimental)",
-     "send a precharge contactor open request (CAN ID 0x0C50FF47)? This is unverified against real "
-     "hardware - only try this if you know what you are doing.",
-     [](Battery* b) { return b && b->supports_precharge_contactor_control(); },
-     [](Battery* b) { b->request_open_precharge_contactor(); }},
     {"resetSOH", "Reset degradation data", "reset degradation data?",
      [](Battery* b) { return b && b->supports_reset_SOH(); }, [](Battery* b) { b->reset_SOH(); }},
     {"setFactoryMode", "Set Factory Mode", "set factory mode and disable isolation measurement?",
@@ -71,10 +71,30 @@ std::vector<BatteryCommand> battery_commands = {
     {"resetEnergySavingMode", "Reset Energy Saving Mode", "reset energy saving mode to normal?",
      [](Battery* b) { return b && b->supports_energy_saving_mode_reset(); },
      [](Battery* b) { b->reset_energy_saving_mode(); }},
-    {"resetCommand", "Send Reset Command (experimental)",
-     "send the experimental BCMU Reset Command (CAN ID 0x09E0FFFF)? Its effect on real hardware is "
-     "unverified - only try this if you know what you are doing.",
-     [](Battery* b) { return b && b->supports_reset_command(); }, [](Battery* b) { b->request_reset_command(); }},
+    {"timeSync", "Set BMS clock to this browser's time",
+     "set the BMS real-time clock to the current local time of this browser?",
+     [](Battery* b) { return b && b->supports_time_sync(); }, [](Battery*) {}, false,
+     [](Battery* b, uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute, uint16_t ms) {
+       b->request_time_sync(year, month, day, hour, minute, ms);
+     }},
+
+    /*
+    Sunwoda BCMU manual contactor control (object 71, see Sunwoda-ESS.h). Each close also switches
+    the BCMU to Debugging work mode first; the driver opens everything automatically on any alarm or
+    fault. Prompt text must not contain apostrophes - it is emitted into a single-quoted JavaScript
+    window.confirm() string.
+    */
+    vendor_command("swNegativeClose", "Close negative contactor", "close the negative contactor?"),
+    vendor_command("swNegativeOpen", "Open negative contactor", nullptr),
+    vendor_command("swPrechargeClose", "Close precharge contactor",
+                   "close the precharge contactor? With the negative closed this charges the output through "
+                   "the precharge resistor."),
+    vendor_command("swPrechargeOpen", "Open precharge contactor", nullptr),
+    vendor_command("swMainClose", "Close main contactor",
+                   "close the main contactor? With the negative closed this connects the full pack voltage to "
+                   "the output - precharge first."),
+    vendor_command("swMainOpen", "Open main contactor", nullptr),
+    vendor_command("swOpenAll", "Open all contactors", nullptr),
 };
 
 String advanced_battery_processor(const String& var) {
@@ -117,8 +137,14 @@ String advanced_battery_processor(const String& var) {
           if (cmd.reload_after) {
             content += "  xhr.onload = function(){ setTimeout(function(){ location.reload(); }, 1500); };";
           }
-          // Send index of the battery as PUT content
-          content += "  xhr.send(batteryNum);";
+          // Send index of the battery as PUT content, followed by the browser's local time if needed
+          if (cmd.action_with_time) {
+            content += "  var d = new Date();";
+            content += "  xhr.send(batteryNum + ',' + d.getFullYear() + ',' + (d.getMonth() + 1) + ',' + d.getDate() +";
+            content += "    ',' + d.getHours() + ',' + d.getMinutes() + ',' + (d.getSeconds() * 1000 + d.getMilliseconds()));";
+          } else {
+            content += "  xhr.send(batteryNum);";
+          }
           content += "}";
           content += "</script>";
         }
