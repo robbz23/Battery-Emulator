@@ -107,9 +107,11 @@ static const char* const IPV4_PATTERN = R"(((25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(25[
 
 #ifdef HW_LILYGO2CAN
 static const std::map<int, String> led_modes = {{0, "Classic"},     {1, "Energy Flow"},     {2, "Heartbeat"},
-                                                {3, "GRB Classic"}, {4, "GRB Energy Flow"}, {5, "GRB Heartbeat"}};
+                                                {3, "GRB Classic"}, {4, "GRB Energy Flow"}, {5, "GRB Heartbeat"},
+                                                {6, "SOC bar"}};
 #else
-static const std::map<int, String> led_modes = {{0, "Classic"}, {1, "Energy Flow"}, {2, "Heartbeat"}};
+static const std::map<int, String> led_modes = {
+    {0, "Classic"}, {1, "Energy Flow"}, {2, "Heartbeat"}, {3, "SOC bar"}};
 #endif
 
 // Periodic BMS reset interval, stored in hours.
@@ -348,6 +350,9 @@ String settings_processor(const String& var, BatteryEmulatorSettingsStore& setti
     return options_from_map(settings.getUInt("GTWPACK", user_selected_tesla_GTW_packEnergy), tesla_pack);
   }
 
+  if (var == "LEDCOUNT") {
+    return String(settings.getUInt("LEDCOUNT", 0));
+  }
   if (var == "LEDMODE") {
     return options_from_map(settings.getUInt("LEDMODE", 0), led_modes);
   }
@@ -2143,6 +2148,10 @@ const char* getCANInterfaceName(CAN_Interface interface) {
         <label for='LEDMODE'>Status LED pattern: </label><select name='LEDMODE' id='LEDMODE'>
         %LEDMODE%
         </select>
+
+        <label>Addressable LED strip length: </label>
+        <input name='LEDCOUNT' pattern="[0-9]+" type='text' value='%LEDCOUNT%' 
+        title="Number of WS2812/NeoPixel LEDs on the status LED pin. 0 uses the board default. The SOC bar mode spreads the charge level across the whole strip." />
 
         )rawliteral" GPIOOPT1_SETTING R"rawliteral(
         )rawliteral" GPIOOPT2_SETTING R"rawliteral(
