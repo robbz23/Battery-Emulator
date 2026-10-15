@@ -81,6 +81,8 @@ void SunwodaBattery::update_values() {
         (uint32_t)RECOVERY_CHARGE_CURRENT_DA * datalayer.battery.status.voltage_dV / 100;
   }
 
+  apply_charge_taper(millis());
+
   /*
   Contactor closing policy:
 
@@ -534,6 +536,44 @@ void SunwodaBattery::open_all_contactors() {
   enqueue_vendor_command(&CMD_MAIN_OPEN);
   enqueue_vendor_command(&CMD_PRECHARGE_OPEN);
   enqueue_vendor_command(&CMD_NEGATIVE_OPEN);
+}
+
+void SunwodaBattery::apply_charge_taper(unsigned long now) {
+  // Some cell readings include ~20-35 mOhm of link resistance (module position 17), so they jump about
+  // 30 mV per amp the moment charge current flows. Above ~7 A that crosses the BCMU's 3.60 V severe
+  // limit within seconds and it opens; it then recovers and the cycle repeats. So the offered charge
+  // current is regulated on the highest cell reading: start low, creep up while comfortably below the
+  // target, back off quickly above it. Near full this also tapers the current like a CV phase.
+  if (!extended_data.main_contactor_closed || extended_data.faultActive) {
+    taper_cap_dA = TAPER_START_DA;  // next charge starts low again
+    return;
+  }
+  if (packCurrent_dA < TAPER_CHARGING_DA) {
+    taper_cap_dA = TAPER_START_DA;  // idle or discharging: do not let the cap creep up unobserved
+    last_taper_step_ms = now;
+  } else if (maxCellVoltage >= TAPER_TARGET_MV + TAPER_HARD_MARGIN_MV) {
+    if (now - last_taper_cut_ms >= TAPER_CUT_INTERVAL_MS) {
+      taper_cap_dA = taper_cap_dA / 2;
+      last_taper_cut_ms = now;
+    }
+    last_taper_step_ms = now;
+  } else if (maxCellVoltage > TAPER_TARGET_MV) {
+    if (now - last_taper_cut_ms >= TAPER_CUT_INTERVAL_MS) {
+      taper_cap_dA = taper_cap_dA > TAPER_CUT_DA ? taper_cap_dA - TAPER_CUT_DA : 0;
+      last_taper_cut_ms = now;
+    }
+    last_taper_step_ms = now;
+  } else if (maxCellVoltage + TAPER_STEP_MARGIN_MV < TAPER_TARGET_MV && now - last_taper_step_ms >= TAPER_STEP_MS) {
+    if (taper_cap_dA < TAPER_MAX_DA) {
+      taper_cap_dA += TAPER_STEP_DA;
+    }
+    last_taper_step_ms = now;
+  }
+  if (datalayer.battery.status.max_charge_current_dA > taper_cap_dA) {
+    datalayer.battery.status.max_charge_current_dA = taper_cap_dA;
+    datalayer.battery.status.max_charge_power_W = (uint32_t)taper_cap_dA * datalayer.battery.status.voltage_dV / 100;
+  }
+  extended_data.charge_taper_dA = taper_cap_dA;
 }
 
 void SunwodaBattery::check_auto_open() {

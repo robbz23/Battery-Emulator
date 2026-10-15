@@ -41,7 +41,9 @@ static constexpr uint32_t write_ack_id(uint8_t object) {
 
 class SunwodaBattery : public CanBattery {
  public:
-  SunwodaBattery() : CanBattery(CAN_Speed::CAN_SPEED_500KBPS) {}
+  // V4.04 runs the host bus at 250 kbit/s (stock), V1.16 at 500. Start at 250 and let
+  // autodetect_can_speed() find the other if needed.
+  SunwodaBattery() : CanBattery(CAN_Speed::CAN_SPEED_250KBPS) {}
 
   virtual void setup(void);
   virtual void handle_incoming_can_frame(CAN_frame rx_frame);
@@ -206,10 +208,10 @@ class SunwodaBattery : public CanBattery {
   nothing has been heard from the BCMU (source node 0x50) for CAN_SPEED_PROBE_MS, switch to the other
   speed and keep alternating until it is heard. A node at the wrong speed error-flags every frame,
   so nothing is transmitted on purpose until the BCMU has been heard at the current speed.
-  Disabled while the BCMU shares the native bus with a 500k inverter: flipping the shared port to
-  250k would cut the inverter off. A V4.04 BCMU is switched to 500k over BDM for now.
+  Safe to enable once the BCMU is on its own interface (e.g. the MCP2515/2518 add-on): flipping that
+  port's speed no longer disturbs the inverter on the native bus. Keep it false if they share a bus.
   */
-  static const bool CAN_SPEED_AUTODETECT = false;
+  static const bool CAN_SPEED_AUTODETECT = true;
   static const unsigned long CAN_SPEED_PROBE_MS = 3000;
   static const unsigned long BCMU_LINK_TIMEOUT_MS = 2000;
   unsigned long last_bcmu_rx_ms = 0;
@@ -276,6 +278,22 @@ class SunwodaBattery : public CanBattery {
   static const uint16_t RECOVERY_CHARGE_MAX_CELL_MV = 3500;     // stop offering it at this (LFP)
   static const uint16_t RECOVERY_CHARGE_RESUME_CELL_MV = 3350;  // ...and only resume below this
   bool recovery_charge_blocked = false;
+
+  // Charge taper on the highest cell reading (see apply_charge_taper()).
+  void apply_charge_taper(unsigned long now);
+  static const uint16_t TAPER_TARGET_MV = 3500;        // 50 mV under BCMU 3550 mV cut, 100 mV under 3600 mV trip
+  static const uint16_t TAPER_HARD_MARGIN_MV = 50;     // above target + this: halve the current
+  static const uint16_t TAPER_STEP_MARGIN_MV = 20;     // only step up while this far below target
+  static const uint16_t TAPER_START_DA = 30;           // 3.0 A at the start of every charge
+  static const uint16_t TAPER_STEP_DA = 5;             // +0.5 A ...
+  static const unsigned long TAPER_STEP_MS = 10000;    // ... every 10 s
+  static const uint16_t TAPER_CUT_DA = 10;             // -1.0 A ...
+  static const unsigned long TAPER_CUT_INTERVAL_MS = 3000;  // ... at most every 3 s
+  static const uint16_t TAPER_MAX_DA = 2000;           // never above 200 A (BCMU limit applies anyway)
+  static const int16_t TAPER_CHARGING_DA = 5;          // pack counts as charging above 0.5 A
+  uint16_t taper_cap_dA = TAPER_START_DA;
+  unsigned long last_taper_step_ms = 0;
+  unsigned long last_taper_cut_ms = 0;
   int16_t maxTemperature = 0;
 
   uint8_t actual_cell_count = 0;

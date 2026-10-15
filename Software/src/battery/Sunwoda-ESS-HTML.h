@@ -52,6 +52,7 @@ struct SunwodaExtendedData {
   // identified - best-effort inference, not confirmed from the vendor documentation.
   uint16_t softwareVersion = 0;
   uint16_t can_speed_kbps = 500;  // host bus speed currently in use (auto-detected)
+  uint16_t charge_taper_dA = 0;   // charge current cap from the highest-cell taper
   uint16_t hardwareVersion = 0;
 
   // Individual temperature sensor readings, 0x0C50FF57 (gTempArray_87 - not in either vendor
@@ -147,7 +148,8 @@ class SunwodaHtmlRenderer : public BatteryHtmlRenderer {
           "alarms below.</h4>";
     }
 
-    content += "<h4>CAN speed: " + String(data->can_speed_kbps) + " kbit/s (auto-detected)</h4>";
+    content += "<h4>CAN speed: " + String(data->can_speed_kbps) + " kbit/s</h4>";
+    content += "<h4>Charge taper cap: " + String(data->charge_taper_dA / 10.0, 1) + " A (on highest cell, target 3.50 V)</h4>";
     content += "<h4>Software version: " + String(data->softwareVersion / 10.0f, 1) + "</h4>";
     content += "<h4>Hardware version: " + String(data->hardwareVersion / 10.0f, 1) + "</h4>";
 
