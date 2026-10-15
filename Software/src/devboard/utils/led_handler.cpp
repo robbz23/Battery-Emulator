@@ -26,6 +26,7 @@ static uint32_t scale_color(uint32_t color, uint8_t brightness) {
 #define HEARTBEAT_DEVIATION 50  // 0.05 * 1000
 #define SCALE_FACTOR 1000
 
+uint8_t user_selected_led_pin = 255;
 uint8_t user_selected_led_count = 0;
 
 static LED* led = nullptr;
@@ -54,7 +55,10 @@ uint16_t map_int(uint16_t x, uint16_t in_min, uint16_t in_max, uint16_t out_min,
 }
 
 bool led_init(void) {
-  gpio_num_t led_pin = esp32hal->LED_PIN();
+  // A user-set GPIO overrides the board default. GPIO_NUM_MAX bounds it; alloc_pins() below
+  // still rejects a pin another peripheral already owns.
+  gpio_num_t led_pin = (user_selected_led_pin < GPIO_NUM_MAX) ? (gpio_num_t)user_selected_led_pin
+                                                              : esp32hal->LED_PIN();
 
   if (led_pin == GPIO_NUM_NC) {
     return true;

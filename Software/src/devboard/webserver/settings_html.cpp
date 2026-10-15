@@ -350,6 +350,9 @@ String settings_processor(const String& var, BatteryEmulatorSettingsStore& setti
     return options_from_map(settings.getUInt("GTWPACK", user_selected_tesla_GTW_packEnergy), tesla_pack);
   }
 
+  if (var == "LEDPIN") {
+    return String(settings.getUInt("LEDPIN", 255));
+  }
   if (var == "LEDCOUNT") {
     return String(settings.getUInt("LEDCOUNT", 0));
   }
@@ -2148,6 +2151,10 @@ const char* getCANInterfaceName(CAN_Interface interface) {
         <label for='LEDMODE'>Status LED pattern: </label><select name='LEDMODE' id='LEDMODE'>
         %LEDMODE%
         </select>
+
+        <label>Addressable LED GPIO: </label>
+        <input name='LEDPIN' pattern="[0-9]+" type='text' value='%LEDPIN%' 
+        title="GPIO driving the WS2812/NeoPixel data line. 255 uses the board default pin. Useful when the default pin is not broken out on a header." />
 
         <label>Addressable LED strip length: </label>
         <input name='LEDCOUNT' pattern="[0-9]+" type='text' value='%LEDCOUNT%' 
