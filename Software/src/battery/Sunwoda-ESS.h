@@ -208,10 +208,11 @@ class SunwodaBattery : public CanBattery {
   nothing has been heard from the BCMU (source node 0x50) for CAN_SPEED_PROBE_MS, switch to the other
   speed and keep alternating until it is heard. A node at the wrong speed error-flags every frame,
   so nothing is transmitted on purpose until the BCMU has been heard at the current speed.
-  Safe to enable once the BCMU is on its own interface (e.g. the MCP2515/2518 add-on): flipping that
-  port's speed no longer disturbs the inverter on the native bus. Keep it false if they share a bus.
+  Only safe when the BCMU has an interface to itself (e.g. the MCP2515/2518 add-on). While it shares
+  the native bus with the inverter, probing drags that port's speed with it and cuts the inverter off
+  as well, so leave this false and set the BCMU's speed to match the bus instead.
   */
-  static const bool CAN_SPEED_AUTODETECT = true;
+  static const bool CAN_SPEED_AUTODETECT = false;
   static const unsigned long CAN_SPEED_PROBE_MS = 3000;
   static const unsigned long BCMU_LINK_TIMEOUT_MS = 2000;
   unsigned long last_bcmu_rx_ms = 0;
